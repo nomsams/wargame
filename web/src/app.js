@@ -1,5 +1,6 @@
 import {
   GameRuleError,
+  availableUnitCount,
   availableUpgrades,
   buyWorldUpgrade,
   canReach,
@@ -7,6 +8,7 @@ import {
   checkVictory,
   displayCountry,
   endTurn,
+  maxPurchasableUnits,
   newGame,
   publicCountryView,
   queueBuy,
@@ -70,8 +72,13 @@ function withRules(action) {
     action();
     autosave();
     renderAll();
+    checkEnding();
+    return true;
   } catch (error) {
-    if (error instanceof GameRuleError) notify(error.message, "bad");
+    if (error instanceof GameRuleError) {
+      notify(error.message, "bad");
+      return false;
+    }
     else throw error;
   }
 }
@@ -288,13 +295,13 @@ function renderCountryPanel() {
   panel.style.setProperty("--accent", ownerMeta.accent);
   panel.innerHTML = `
     <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt="">${escapeHtml(resource)} · $${source.cashPerTurn}/year</div></div>
-    <section class="panel-section"><h3>Garrison</h3>${unitsMarkup(view)}</section>
-    <section class="panel-section"><h3>Infrastructure</h3>${view.upgrades ? `<div class="upgrade-pills">${upgradePills}</div>` : `<div class="redacted">Infrastructure classified</div>`}</section>
-    <section class="panel-section"><h3>Strategic data</h3><div class="upgrade-pills"><span>${escapeHtml(source.hasSeaBorder ? "Sea border" : "Landlocked")}</span><span>${source.adjoiningCountries.length} borders</span>${country.nukedUntil > gameState.year ? `<span>Uninhabitable until ${country.nukedUntil}</span>` : ""}</div></section>
     <div class="country-actions">
       ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action">Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>` : ""}
       ${hostile ? `<button id="spy-country-action">Spy</button><button id="attack-help-action" class="attack">How to attack</button>` : ""}
-    </div>`;
+    </div>
+    <section class="panel-section"><h3>Garrison</h3>${unitsMarkup(view)}</section>
+    <section class="panel-section"><h3>Infrastructure</h3>${view.upgrades ? `<div class="upgrade-pills">${upgradePills}</div>` : `<div class="redacted">Infrastructure classified</div>`}</section>
+    <section class="panel-section"><h3>Strategic data</h3><div class="upgrade-pills"><span>${escapeHtml(source.hasSeaBorder ? "Sea border" : "Landlocked")}</span><span>${source.adjoiningCountries.length} borders</span>${country.nukedUntil > gameState.year ? `<span>Uninhabitable until ${country.nukedUntil}</span>` : ""}</div></section>`;
   $("#move-action")?.addEventListener("click", () => openMoveDialog(selectedCountry));
   $("#close-country")?.addEventListener("click", () => { selectedCountry = null; renderAll(); });
   $("#buy-action")?.addEventListener("click", () => openBuyDialog(selectedCountry));
@@ -330,7 +337,9 @@ function openDialog(kicker, title, content, ready) {
   $("#dialog-title").textContent = title;
   $("#dialog-content").innerHTML = content;
   if (!dialog.open) dialog.showModal();
-  ready?.($("#dialog-content"));
+  const root = $("#dialog-content");
+  ready?.(root);
+  requestAnimationFrame(() => $("select, input, button:not(:disabled)", root)?.focus());
 }
 
 function closeDialog() {
@@ -339,25 +348,58 @@ function closeDialog() {
 }
 
 function openBuyDialog(countryName) {
-  const options = Object.entries(UNIT_TYPES).map(([id, unit]) => `<option value="${id}">${unit.label} — $${unitCost(gameData, gameState, gameState.playerFaction, countryName, id)} each</option>`).join("");
-  openDialog(countryLabel(countryName), "Buy Units", `<form id="buy-form" class="dialog-form"><label>Unit type<select id="buy-unit">${options}</select></label><label>Quantity<input id="buy-quantity" type="number" min="1" value="1"></label><p id="buy-total"></p><button class="primary-button" type="submit">Queue purchase</button></form>`, (root) => {
-    const update = () => { const quantity = Math.max(1, Number($("#buy-quantity", root).value)); $("#buy-total", root).textContent = `Order total: $${(unitCost(gameData, gameState, gameState.playerFaction, countryName, $("#buy-unit", root).value) * quantity).toLocaleString()}`; };
-    $("#buy-unit", root).addEventListener("change", update); $("#buy-quantity", root).addEventListener("input", update); update();
-    $("#buy-form", root).addEventListener("submit", (event) => { event.preventDefault(); withRules(() => queueBuy(gameData, gameState, gameState.playerFaction, countryName, $("#buy-unit", root).value, $("#buy-quantity", root).value)); closeDialog(); });
+  const purchasable = Object.entries(UNIT_TYPES).map(([id, unit]) => ({
+    id,
+    unit,
+    cost: unitCost(gameData, gameState, gameState.playerFaction, countryName, id),
+    capacity: maxPurchasableUnits(gameData, gameState, gameState.playerFaction, countryName, id),
+  })).filter((item) => item.capacity > 0);
+  if (!purchasable.length) return notify("No units can be bought here with the available funds.", "bad");
+  const options = purchasable.map(({ id, unit, cost, capacity }) => `<option value="${id}" data-limit="${capacity}">${unit.label} — $${cost} each · max ${capacity}</option>`).join("");
+  openDialog(countryLabel(countryName), "Buy Units", `<form id="buy-form" class="dialog-form"><label>Unit type<select id="buy-unit">${options}</select></label><label>Quantity<input id="buy-quantity" type="number" inputmode="numeric" min="1" step="1" value="1"></label><p id="buy-total" class="order-summary"></p><button class="primary-button" type="submit">Queue purchase</button></form>`, (root) => {
+    const update = (clampQuantity = false) => {
+      const select = $("#buy-unit", root);
+      const quantityInput = $("#buy-quantity", root);
+      const limit = Number(select.selectedOptions[0]?.dataset.limit || 0);
+      quantityInput.max = limit;
+      if (clampQuantity && Number(quantityInput.value) > limit) quantityInput.value = limit;
+      const quantity = Number(quantityInput.value);
+      const validQuantity = Number.isSafeInteger(quantity) && quantity >= 1 && quantity <= limit;
+      const total = validQuantity ? unitCost(gameData, gameState, gameState.playerFaction, countryName, select.value) * quantity : 0;
+      $("#buy-total", root).textContent = validQuantity ? `Available: ${limit} · Order total: $${total.toLocaleString()}` : `Enter a whole number from 1 to ${limit}.`;
+    };
+    $("#buy-unit", root).addEventListener("change", () => update(true));
+    $("#buy-quantity", root).addEventListener("input", () => update());
+    update(true);
+    $("#buy-form", root).addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (withRules(() => queueBuy(gameData, gameState, gameState.playerFaction, countryName, $("#buy-unit", root).value, $("#buy-quantity", root).value))) closeDialog();
+    });
   });
 }
 
 function openMoveDialog(fromName) {
-  const unitOptions = Object.entries(UNIT_TYPES).filter(([id]) => gameState.countries[fromName].units[id] > 0).map(([id, unit]) => `<option value="${id}">${unit.label} (${gameState.countries[fromName].units[id]} available)</option>`).join("");
+  const unitOptions = Object.entries(UNIT_TYPES).map(([id, unit]) => ({ id, unit, available: availableUnitCount(gameState, gameState.playerFaction, fromName, id) })).filter((item) => item.available > 0)
+    .map(({ id, unit, available }) => `<option value="${id}" data-available="${available}">${unit.label} (${available} available)</option>`).join("");
   if (!unitOptions) return notify("No units are available to move.", "bad");
-  openDialog(countryLabel(fromName), "Move / Attack", `<form id="move-form" class="dialog-form"><label>Unit type<select id="move-unit">${unitOptions}</select></label><label>Target<select id="move-target"></select></label><label>Quantity<input id="move-quantity" type="number" min="1" value="1"></label><button class="primary-button" type="submit">Queue order</button></form>`, (root) => {
+  openDialog(countryLabel(fromName), "Move / Attack", `<form id="move-form" class="dialog-form"><label>Unit type<select id="move-unit">${unitOptions}</select></label><label>Target<select id="move-target"></select></label><label>Quantity<input id="move-quantity" type="number" inputmode="numeric" min="1" step="1" value="1"></label><p id="move-help" class="order-summary"></p><button id="move-submit" class="primary-button" type="submit">Queue order</button></form>`, (root) => {
     const updateTargets = () => {
       const unitType = $("#move-unit", root).value;
-      $("#move-target", root).innerHTML = gameData.countries.filter((country) => canReach(gameData, gameState, gameState.playerFaction, fromName, country.name, unitType)).map((country) => `<option value="${country.name}">${escapeHtml(countryLabel(country.name))}${gameState.countries[country.name].owner === gameState.playerFaction ? " — move" : " — attack"}</option>`).join("");
-      $("#move-quantity", root).max = gameState.countries[fromName].units[unitType];
+      const target = $("#move-target", root);
+      target.innerHTML = gameData.countries.filter((country) => canReach(gameData, gameState, gameState.playerFaction, fromName, country.name, unitType)).map((country) => `<option value="${country.name}">${escapeHtml(countryLabel(country.name))}${gameState.countries[country.name].owner === gameState.playerFaction ? " — move" : " — attack"}</option>`).join("");
+      const available = availableUnitCount(gameState, gameState.playerFaction, fromName, unitType);
+      const quantity = $("#move-quantity", root);
+      quantity.max = available;
+      if (Number(quantity.value) > available) quantity.value = available;
+      target.disabled = !target.options.length;
+      $("#move-submit", root).disabled = !target.options.length;
+      $("#move-help", root).textContent = target.options.length ? `${available} uncommitted ${UNIT_TYPES[unitType].label.toLowerCase()} can be ordered.` : "No valid target is in range for this unit.";
     };
     $("#move-unit", root).addEventListener("change", updateTargets); updateTargets();
-    $("#move-form", root).addEventListener("submit", (event) => { event.preventDefault(); withRules(() => queueMove(gameData, gameState, gameState.playerFaction, fromName, $("#move-target", root).value, $("#move-unit", root).value, $("#move-quantity", root).value)); closeDialog(); });
+    $("#move-form", root).addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (withRules(() => queueMove(gameData, gameState, gameState.playerFaction, fromName, $("#move-target", root).value, $("#move-unit", root).value, $("#move-quantity", root).value))) closeDialog();
+    });
   });
 }
 
@@ -369,14 +411,14 @@ function upgradeCard(upgrade, mode, countryName = null) {
 function openCountryUpgrades(countryName) {
   const upgrades = availableUpgrades(gameData, gameState, gameState.playerFaction, "country", countryName);
   openDialog(countryLabel(countryName), "Country Upgrades", upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "country", countryName)).join("")}</div>` : `<p>Every available upgrade has already been built here.</p>`, (root) => {
-    $$('[data-mode="country"]', root).forEach((button) => button.addEventListener("click", () => { withRules(() => queueUpgrade(gameData, gameState, gameState.playerFaction, countryName, Number(button.dataset.upgrade))); closeDialog(); }));
+    $$('[data-mode="country"]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => queueUpgrade(gameData, gameState, gameState.playerFaction, countryName, Number(button.dataset.upgrade)))) closeDialog(); }));
   });
 }
 
 function openWorldUpgrades() {
   const upgrades = availableUpgrades(gameData, gameState, gameState.playerFaction, "world");
   openDialog("Faction research", "World Upgrades", upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "world")).join("")}</div>` : `<p>All faction world upgrades have been completed.</p>`, (root) => {
-    $$('[data-mode="world"]', root).forEach((button) => button.addEventListener("click", () => { withRules(() => buyWorldUpgrade(gameData, gameState, gameState.playerFaction, Number(button.dataset.upgrade))); closeDialog(); }));
+    $$('[data-mode="world"]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => buyWorldUpgrade(gameData, gameState, gameState.playerFaction, Number(button.dataset.upgrade)))) closeDialog(); }));
   });
 }
 
@@ -397,8 +439,8 @@ function openSpyDialog(defaultTarget = null) {
   const strategic = `${faction.nukes > 0 ? `<article class="action-card"><img src="${asset("ManhattanProjectImage.png")}" alt=""><div><h3>Nuclear strike (${faction.nukes})</h3><p>Erase the target garrison, infrastructure, and control.</p><button type="button" data-weapon="nuke">Launch</button></div></article>` : ""}${faction.worldUpgrades.includes(17) ? `<article class="action-card"><img src="${asset("RailGunImage.png")}" alt=""><div><h3>Rail Gun</h3><p>Destroy roughly 85% of every defending unit. Ready ${faction.railGunReady <= gameState.year ? "now" : `in ${faction.railGunReady}`}.</p><button type="button" data-weapon="railgun" ${faction.railGunReady > gameState.year ? "disabled" : ""}>Fire</button></div></article>` : ""}`;
   const cards = Object.entries(SPY_ACTIONS).map(([id, action]) => `<article class="action-card"><img src="${asset(id === "intelligence" ? "IntelligenceImage.png" : id === "bribery" ? "BriberyImage.png" : "HitImage.png")}" alt=""><div><h3>${action.title} <span class="price">$${action.cost}</span></h3><p>${escapeHtml(localized(`Spy Action ${action.title} Description`, action.description))}</p><button type="button" data-spy="${id}" ${action.upgrade && !faction.worldUpgrades.includes(action.upgrade) ? "disabled" : ""}>Use</button></div></article>`).join("");
   openDialog("Immediate operations", "Spying & Strategic Weapons", `<label>Target<select id="spy-target">${options}</select></label><div class="dialog-grid" style="margin-top:14px">${cards}${strategic}</div>`, (root) => {
-    $$('[data-spy]', root).forEach((button) => button.addEventListener("click", () => { withRules(() => useSpyAction(gameData, gameState, gameState.playerFaction, button.dataset.spy, $("#spy-target", root).value)); closeDialog(); }));
-    $$('[data-weapon]', root).forEach((button) => button.addEventListener("click", () => { withRules(() => useStrategicWeapon(gameState, gameState.playerFaction, button.dataset.weapon, $("#spy-target", root).value)); closeDialog(); }));
+    $$('[data-spy]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => useSpyAction(gameData, gameState, gameState.playerFaction, button.dataset.spy, $("#spy-target", root).value))) closeDialog(); }));
+    $$('[data-weapon]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => useStrategicWeapon(gameState, gameState.playerFaction, button.dataset.weapon, $("#spy-target", root).value))) closeDialog(); }));
   });
 }
 
@@ -412,7 +454,7 @@ function actionDescription(action) {
 function openQueue() {
   const actions = gameState.queue.filter((action) => action.faction === gameState.playerFaction);
   openDialog("Pending orders", "Action Queue", actions.length ? `<div class="queue-list">${actions.map((action) => `<div class="queue-item"><div><strong>${escapeHtml(actionDescription(action))}</strong><span>${action.cost ? ` · $${action.cost} reserved` : ""}</span></div><button type="button" data-cancel="${action.id}">Cancel</button></div>`).join("")}</div>` : `<p>No orders are queued. Spy actions are processed immediately.</p>`, (root) => {
-    $$('[data-cancel]', root).forEach((button) => button.addEventListener("click", () => { withRules(() => cancelAction(gameState, button.dataset.cancel)); closeDialog(); openQueue(); }));
+    $$('[data-cancel]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => cancelAction(gameState, button.dataset.cancel))) { closeDialog(); openQueue(); } }));
   });
 }
 
@@ -452,12 +494,13 @@ function bindEvents() {
   $$('[data-screen]').forEach((button) => button.addEventListener("click", () => showScreen(button.dataset.screen)));
   $("#setup-form").addEventListener("submit", (event) => { event.preventDefault(); startCampaign(); });
   $(".dialog-close").addEventListener("click", closeDialog);
+  $("#command-dialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeDialog(); });
   $("#queue-button").addEventListener("click", openQueue);
   $("#world-upgrades-button").addEventListener("click", openWorldUpgrades);
   $("#espionage-button").addEventListener("click", () => openSpyDialog(selectedCountry));
   $("#objective-button").addEventListener("click", openObjective);
   $("#save-button").addEventListener("click", () => { autosave(); notify("Campaign saved in this browser.", "good"); });
-  $("#end-turn-button").addEventListener("click", () => withRules(() => { endTurn(gameData, gameState); notify(`Orders resolved. Year ${gameState.year} begins.`, "good"); checkEnding(); }));
+  $("#end-turn-button").addEventListener("click", () => withRules(() => { endTurn(gameData, gameState); notify(`Orders resolved. Year ${gameState.year} begins.`, "good"); }));
   $("#ending-menu").addEventListener("click", () => { $("#ending").hidden = true; showScreen("menu-screen"); });
   $("#zoom-in").addEventListener("click", () => { mapView.zoom = Math.min(4, mapView.zoom * 1.25); drawMap(); });
   $("#zoom-out").addEventListener("click", () => { mapView.zoom = Math.max(1, mapView.zoom / 1.25); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); });
@@ -465,7 +508,22 @@ function bindEvents() {
   canvas.addEventListener("wheel", (event) => { event.preventDefault(); mapView.zoom = clampMapZoom(mapView.zoom * (event.deltaY < 0 ? 1.12 : .9)); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); }, { passive: false });
   canvas.addEventListener("pointerdown", (event) => { canvas.setPointerCapture(event.pointerId); mapView.dragging = true; mapView.moved = 0; mapView.lastX = event.clientX; mapView.lastY = event.clientY; });
   canvas.addEventListener("pointermove", (event) => { if (!mapView.dragging) return; const dx = event.clientX - mapView.lastX; const dy = event.clientY - mapView.lastY; mapView.moved += Math.abs(dx) + Math.abs(dy); if (mapView.zoom > 1) { mapView.panX += dx; mapView.panY += dy; drawMap(); } mapView.lastX = event.clientX; mapView.lastY = event.clientY; });
-  canvas.addEventListener("pointerup", (event) => { if (mapView.moved < 6) pickCountry(event); mapView.dragging = false; });
+  canvas.addEventListener("pointerup", (event) => {
+    if (mapView.moved < 6) pickCountry(event);
+    mapView.dragging = false;
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointercancel", () => { mapView.dragging = false; mapView.moved = 0; });
+  canvas.addEventListener("lostpointercapture", () => { mapView.dragging = false; });
+  canvas.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const countries = gameData.map.countries;
+    const current = Math.max(0, countries.findIndex((country) => country.name === selectedCountry));
+    const index = event.key === "Home" ? 0 : event.key === "End" ? countries.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + countries.length) % countries.length;
+    selectedCountry = countries[index].name;
+    renderAll();
+  });
   new ResizeObserver(() => { resizeMap(); drawMap(); }).observe(canvas);
 }
 

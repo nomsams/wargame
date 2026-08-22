@@ -99,9 +99,41 @@ export function newGame(data, options = {}) {
 }
 
 export function validateSavedGame(value, data) {
-  if (!value || value.saveVersion !== SAVE_VERSION || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || value.saveVersion !== SAVE_VERSION) return false;
   if (!factionSource(data, value.playerFaction) || !OBJECTIVES[value.objective]) return false;
-  return data.countries.every((country) => value.countries?.[country.name]?.units);
+  if (!Number.isSafeInteger(value.seed) || !Number.isSafeInteger(value.year) || !Number.isSafeInteger(value.turn)
+    || !["playing", "victory", "defeat"].includes(value.status) || !["easy", "normal", "hard"].includes(value.difficulty)) return false;
+  if (!Array.isArray(value.queue) || !Array.isArray(value.intel) || !Array.isArray(value.log)) return false;
+  const factionNames = new Set(data.factions.map((faction) => faction.factionName));
+  const countryNames = new Set(data.countries.map((country) => country.name));
+  const validFactions = data.factions.every((source) => {
+    const faction = value.factions?.[source.factionName];
+    return faction && Number.isFinite(faction.cash) && faction.cash >= 0 && typeof faction.defeated === "boolean"
+      && Array.isArray(faction.worldUpgrades) && Number.isSafeInteger(faction.nukes) && faction.nukes >= 0
+      && Number.isSafeInteger(faction.railGunReady) && Number.isSafeInteger(faction.conquests) && faction.conquests >= 0
+      && faction.general && typeof faction.general.name === "string" && Number.isSafeInteger(faction.general.level)
+      && Number.isSafeInteger(faction.general.inactiveUntil);
+  });
+  if (!validFactions) return false;
+  const validCountries = data.countries.every((source) => {
+    const country = value.countries?.[source.name];
+    return country && (country.owner === null || factionNames.has(country.owner)) && Array.isArray(country.upgrades)
+      && (country.bribedBy === null || factionNames.has(country.bribedBy)) && Number.isSafeInteger(country.nukedUntil)
+      && Object.keys(UNIT_TYPES).every((unitType) => Number.isSafeInteger(country.units?.[unitType]) && country.units[unitType] >= 0);
+  });
+  if (!validCountries) return false;
+  const validQueue = value.queue.every((action) => {
+    if (!action || typeof action.id !== "string" || !factionNames.has(action.faction) || !Number.isSafeInteger(action.quantity ?? 1)) return false;
+    if (action.type === "buy") return countryNames.has(action.country) && UNIT_TYPES[action.unitType]
+      && action.quantity > 0 && Number.isFinite(action.cost) && action.cost >= 0;
+    if (action.type === "move") return countryNames.has(action.from) && countryNames.has(action.to)
+      && UNIT_TYPES[action.unitType] && action.quantity > 0;
+    if (action.type === "country-upgrade") return countryNames.has(action.country) && upgradeById(action.upgradeId)?.scope === "country"
+      && Number.isFinite(action.cost) && action.cost >= 0;
+    return false;
+  });
+  return validQueue && value.intel.every((item) => typeof item === "string")
+    && value.log.every((item) => item && Number.isSafeInteger(item.year) && typeof item.message === "string");
 }
 
 export function availableUpgrades(data, state, factionName, scope, countryName = null) {
@@ -112,7 +144,10 @@ export function availableUpgrades(data, state, factionName, scope, countryName =
     if (upgrade.scope !== scope) return false;
     if (!factionCanBuild(faction, upgrade.id) && !(quickLearner && scope === "country" && upgrade.id >= 3 && upgrade.id <= 8)) return false;
     if (scope === "world") return !ownsUpgrade(state, factionName, upgrade.id);
-    return countryName ? !state.countries[countryName].upgrades.includes(upgrade.id) : true;
+    if (!countryName) return true;
+    const alreadyQueued = state.queue.some((action) => action.type === "country-upgrade"
+      && action.faction === factionName && action.country === countryName && action.upgradeId === upgrade.id);
+    return !state.countries[countryName].upgrades.includes(upgrade.id) && !alreadyQueued;
   });
 }
 
@@ -142,17 +177,42 @@ function canBuyIn(data, state, factionName, countryName) {
     && (source.faction === factionName || country.upgrades.includes(1) || ownsUpgrade(state, factionName, 19));
 }
 
+function positiveQuantity(quantity) {
+  const amount = Number(quantity);
+  if (!Number.isSafeInteger(amount) || amount < 1) throw new GameRuleError("Choose a positive whole number of units.");
+  return amount;
+}
+
+function queuedCommandos(state, factionName) {
+  return state.queue.filter((action) => action.type === "buy" && action.faction === factionName && action.unitType === "commandos")
+    .reduce((sum, action) => sum + action.quantity, 0);
+}
+
+export function maxPurchasableUnits(data, state, factionName, countryName, unitType) {
+  const faction = state.factions[factionName];
+  const source = countrySource(data, countryName);
+  if (!faction || !source || !UNIT_TYPES[unitType] || !canBuyIn(data, state, factionName, countryName)) return 0;
+  if (unitType === "ships" && !source.hasSeaBorder) return 0;
+  let capacity = Math.floor(faction.cash / unitCost(data, state, factionName, countryName, unitType));
+  if (unitType === "commandos") {
+    const owned = Object.values(state.countries).reduce((sum, country) => sum + (country.owner === factionName ? country.units.commandos : 0), 0);
+    const cap = ownsUpgrade(state, factionName, 16) ? 300 : 100;
+    capacity = Math.min(capacity, cap - owned - queuedCommandos(state, factionName));
+  }
+  return Math.max(0, capacity);
+}
+
 export function queueBuy(data, state, factionName, countryName, unitType, quantity) {
   ensurePlaying(state);
   const faction = factionState(state, factionName);
-  const amount = Math.floor(Number(quantity));
-  if (!UNIT_TYPES[unitType] || amount < 1) throw new GameRuleError("Choose at least one unit.");
+  if (!UNIT_TYPES[unitType]) throw new GameRuleError("Choose a valid unit type.");
+  const amount = positiveQuantity(quantity);
   if (!canBuyIn(data, state, factionName, countryName)) throw new GameRuleError("Units can only be bought in a starting country or Supply Center.");
   const source = countrySource(data, countryName);
   if (unitType === "ships" && !source.hasSeaBorder) throw new GameRuleError("Ships require a sea border.");
   const currentCommandos = Object.values(state.countries).reduce((sum, country) => sum + (country.owner === factionName ? country.units.commandos : 0), 0);
   const cap = ownsUpgrade(state, factionName, 16) ? 300 : 100;
-  if (unitType === "commandos" && currentCommandos + amount > cap) throw new GameRuleError(`Your commando limit is ${cap}.`);
+  if (unitType === "commandos" && currentCommandos + queuedCommandos(state, factionName) + amount > cap) throw new GameRuleError(`Your commando limit is ${cap}.`);
   const total = unitCost(data, state, factionName, countryName, unitType) * amount;
   if (faction.cash < total) throw new GameRuleError("Insufficient funds.");
   faction.cash -= total;
@@ -163,6 +223,12 @@ export function queueBuy(data, state, factionName, countryName, unitType, quanti
 function committedUnits(state, factionName, countryName, unitType) {
   return state.queue.filter((action) => action.type === "move" && action.faction === factionName && action.from === countryName && action.unitType === unitType)
     .reduce((sum, action) => sum + action.quantity, 0);
+}
+
+export function availableUnitCount(state, factionName, countryName, unitType) {
+  const country = state.countries[countryName];
+  if (!country?.units || !UNIT_TYPES[unitType]) return 0;
+  return Math.max(0, country.units[unitType] - committedUnits(state, factionName, countryName, unitType));
 }
 
 export function canReach(data, state, factionName, fromName, toName, unitType) {
@@ -181,11 +247,11 @@ export function queueMove(data, state, factionName, fromName, toName, unitType, 
   ensurePlaying(state);
   factionState(state, factionName);
   const from = countryState(state, fromName);
-  const amount = Math.floor(Number(quantity));
   if (from.owner !== factionName) throw new GameRuleError("You do not control the source country.");
-  if (!UNIT_TYPES[unitType] || amount < 1) throw new GameRuleError("Choose at least one unit.");
+  if (!UNIT_TYPES[unitType]) throw new GameRuleError("Choose a valid unit type.");
+  const amount = positiveQuantity(quantity);
   if (!canReach(data, state, factionName, fromName, toName, unitType)) throw new GameRuleError("That unit cannot reach the target country.");
-  if (from.units[unitType] - committedUnits(state, factionName, fromName, unitType) < amount) throw new GameRuleError("Not enough uncommitted units in the source country.");
+  if (availableUnitCount(state, factionName, fromName, unitType) < amount) throw new GameRuleError("Not enough uncommitted units in the source country.");
   state.queue.push({ id: cryptoId(state), type: "move", faction: factionName, from: fromName, to: toName, unitType, quantity: amount });
   record(state, `${amount} ${UNIT_TYPES[unitType].label.toLowerCase()} ordered from ${displayCountry(fromName)} to ${displayCountry(toName)}.`);
 }
@@ -269,6 +335,7 @@ export function useStrategicWeapon(state, factionName, kind, targetName) {
     record(state, `Rail Gun devastated ${displayCountry(targetName)}.`, "bad");
   } else throw new GameRuleError("Unknown strategic weapon.");
   updateDefeatedFactions(state);
+  checkVictory(state);
 }
 
 function cryptoId(state) {

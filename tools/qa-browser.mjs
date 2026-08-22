@@ -45,12 +45,14 @@ async function findPage() {
   throw new Error(`Edge debugging endpoint did not start. ${browserErrors}`);
 }
 
+const runtimeErrors = [];
+let socket;
+try {
 const page = await findPage();
-const socket = new WebSocket(page.webSocketDebuggerUrl);
+socket = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
 let commandId = 0;
 const pending = new Map();
-const runtimeErrors = [];
 socket.addEventListener("close", () => {
   for (const { reject } of pending.values()) reject(new Error("Edge debugging connection closed."));
   pending.clear();
@@ -156,6 +158,14 @@ const dialog = await evaluate(`({
   content: document.querySelector('#dialog-content').textContent
 })`);
 if (!dialog.hasQuantity) throw new Error(`Buy dialog failed to render: ${JSON.stringify({ dialog, runtimeErrors })}`);
+await evaluate("document.querySelector('#buy-form').noValidate=true; document.querySelector('#buy-quantity').value='1.5'; document.querySelector('#buy-form').requestSubmit()");
+await delay(120);
+const rejectedOrder = await evaluate(`({
+  dialogOpen: document.querySelector('#command-dialog').open,
+  queue: document.querySelector('#queue-count').textContent,
+  error: document.querySelector('#toast').textContent
+})`);
+if (!rejectedOrder.dialogOpen || rejectedOrder.queue !== "0") throw new Error(`Rejected order changed state or closed its dialog: ${JSON.stringify(rejectedOrder)}.`);
 await evaluate("document.querySelector('#buy-quantity').value='1'; document.querySelector('#buy-form').requestSubmit()");
 await delay(120);
 const queued = await evaluate("document.querySelector('#queue-count').textContent");
@@ -172,11 +182,51 @@ const mobile = await evaluate(`({
   viewport: [innerWidth, innerHeight],
   bodyWidth: document.body.scrollWidth,
   panelVisible: document.querySelector('#country-panel').classList.contains('has-selection'),
-  canvasWidth: Math.round(document.querySelector('#world-map').getBoundingClientRect().width)
+  canvasWidth: Math.round(document.querySelector('#world-map').getBoundingClientRect().width),
+  toolbar: (() => {
+    const bar = document.querySelector('.command-bar');
+    const buttons = [...bar.querySelectorAll('button')].map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { id: button.id, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    });
+    return { clientWidth: bar.clientWidth, scrollWidth: bar.scrollWidth, buttons };
+  })(),
+  countryActions: [...document.querySelectorAll('.country-actions button')].map((button) => {
+    const rect = button.getBoundingClientRect();
+    return { id: button.id, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height };
+  })
 })`);
+if (mobile.bodyWidth > mobile.viewport[0]) throw new Error(`Mobile page overflows horizontally: ${JSON.stringify(mobile)}.`);
+if (mobile.toolbar.scrollWidth > mobile.toolbar.clientWidth) throw new Error(`Mobile toolbar requires horizontal scrolling: ${JSON.stringify(mobile.toolbar)}.`);
+for (const button of mobile.toolbar.buttons) {
+  if (button.left < 0 || button.right > mobile.viewport[0] || button.top < 0 || button.bottom > mobile.viewport[1] || button.height < 44) {
+    throw new Error(`Mobile command is not fully reachable: ${JSON.stringify(button)}.`);
+  }
+}
+for (const button of mobile.countryActions) {
+  if (button.left < 0 || button.right > mobile.viewport[0] || button.top < 0 || button.bottom > mobile.viewport[1] || button.height < 44) {
+    throw new Error(`Mobile country action is not fully reachable: ${JSON.stringify(button)}.`);
+  }
+}
 
-console.log(JSON.stringify({ setup, start, mapSelection, dialog, queued, afterTurn, mobile, runtimeErrors }, null, 2));
-await command("Browser.close").catch(() => {});
-await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
-try { fs.rmSync(profileDirectory, { recursive: true, force: true }); } catch {}
+await evaluate("document.querySelector('#buy-action').click()");
+await delay(120);
+const mobileDialog = await evaluate(`(() => {
+  const dialog = document.querySelector('#command-dialog').getBoundingClientRect();
+  const quantity = document.querySelector('#buy-quantity').getBoundingClientRect();
+  const submit = document.querySelector('#buy-form .primary-button').getBoundingClientRect();
+  return { dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom }, quantityHeight: quantity.height, submitHeight: submit.height };
+})()`);
+if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[0] || mobileDialog.dialog.top < 0 || mobileDialog.dialog.bottom > mobile.viewport[1] || mobileDialog.quantityHeight < 44 || mobileDialog.submitHeight < 44) {
+  throw new Error(`Mobile dialog controls are not fully reachable: ${JSON.stringify(mobileDialog)}.`);
+}
+await screenshot("dialog-mobile.png");
+
+console.log(JSON.stringify({ setup, start, mapSelection, dialog, rejectedOrder, queued, afterTurn, mobile, mobileDialog, runtimeErrors }, null, 2));
+} finally {
+  try { socket?.close(); } catch {}
+  if (!edge.killed) edge.kill();
+  await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
+  try { fs.rmSync(profileDirectory, { recursive: true, force: true }); } catch {}
+}
 if (runtimeErrors.length) process.exitCode = 1;
