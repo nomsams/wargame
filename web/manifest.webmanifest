@@ -1,0 +1,18 @@
+{
+  "name": "Wargame — Browser Preservation Edition",
+  "short_name": "Wargame",
+  "description": "A browser preservation port of Wargame 1.5.1 for iPhone.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#070b11",
+  "theme_color": "#0a111c",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "./assets/Icon.png",
+      "sizes": "57x57",
+      "type": "image/png"
+    }
+  ]
+}

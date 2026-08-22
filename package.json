@@ -1,0 +1,16 @@
+{
+  "name": "wargame-browser-preservation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native preservation port of Wargame 1.5.1 for iOS 3.0.",
+  "homepage": "https://nomsams.github.io/wargame/",
+  "repository": "https://github.com/nomsams/wargame.git",
+  "scripts": {
+    "start": "node tools/serve.mjs web 4317",
+    "test": "node --test web/tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a111c">
+  <meta name="description" content="A browser preservation port of Wargame 1.5.1 for iPhone.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Wargame">
+  <meta name="format-detection" content="telephone=no">
+  <title>Wargame — Browser Preservation Edition</title>
+  <link rel="icon" href="./assets/Icon.png">
+  <link rel="apple-touch-icon" href="./assets/Icon.png">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="loading" class="loading-screen" role="status">
+    <img src="./assets/Icon.png" alt="" width="57" height="57">
+    <p>Recovering strategic command…</p>
+  </div>
+
+  <main id="app" hidden>
+    <section id="menu-screen" class="screen menu-screen active" aria-labelledby="menu-title">
+      <div class="menu-card">
+        <h1 id="menu-title" class="visually-hidden">Wargame</h1>
+        <p class="preservation-mark">Browser Preservation Edition · Original v1.5.1 assets</p>
+        <nav class="menu-actions" aria-label="Main menu">
+          <button id="new-game-button" class="stencil-button">New Game</button>
+          <button id="resume-button" class="stencil-button">Resume Game</button>
+          <button id="manual-button" class="stencil-button">Field Manual</button>
+          <button id="about-button" class="stencil-button minor">Preservation Notes</button>
+        </nav>
+      </div>
+    </section>
+
+    <section id="setup-screen" class="screen setup-screen" aria-labelledby="setup-title">
+      <header class="setup-header">
+        <button class="icon-button" data-screen="menu-screen" aria-label="Back to main menu">←</button>
+        <div>
+          <p class="eyebrow">Campaign setup</p>
+          <h2 id="setup-title">Choose your faction</h2>
+        </div>
+      </header>
+      <form id="setup-form" class="setup-form">
+        <div id="faction-grid" class="faction-grid" role="radiogroup" aria-label="Faction"></div>
+        <div class="setup-options">
+          <label>General name <input id="hero-name" maxlength="24" value="General" autocomplete="off"></label>
+          <label>Objective <select id="objective-select"></select></label>
+          <label>Difficulty
+            <select id="difficulty-select">
+              <option value="easy">Colonel</option>
+              <option value="normal" selected>Marshal</option>
+              <option value="hard">General</option>
+            </select>
+          </label>
+        </div>
+        <button class="primary-button" type="submit">Deploy forces</button>
+      </form>
+    </section>
+
+    <section id="game-screen" class="screen game-screen" aria-label="Tactical command map">
+      <header class="status-bar">
+        <div class="faction-status">
+          <img id="status-flag" alt="" width="42" height="28">
+          <div><strong id="status-faction"></strong><span id="status-general"></span></div>
+        </div>
+        <div class="status-metric"><span>Year</span><strong id="status-year">2010</strong></div>
+        <div class="status-metric"><span>Countries</span><strong id="status-countries">0</strong></div>
+        <div class="status-metric cash"><span>Treasury</span><strong id="status-cash">$0</strong></div>
+      </header>
+
+      <div class="battlefield">
+        <section class="map-shell" aria-label="World map">
+          <canvas id="world-map" tabindex="0" aria-label="Interactive world map. Select a country to inspect or command it."></canvas>
+          <div class="map-controls">
+            <button id="zoom-out" aria-label="Zoom out">−</button>
+            <button id="reset-map" aria-label="Reset map view">◎</button>
+            <button id="zoom-in" aria-label="Zoom in">+</button>
+          </div>
+          <p class="map-hint">Tap a country · drag to pan · wheel or buttons to zoom</p>
+        </section>
+        <aside id="country-panel" class="country-panel" aria-live="polite">
+          <div class="empty-selection">
+            <span class="crosshair">⌖</span>
+            <h2>Select a country</h2>
+            <p>Inspect its garrison, resource, infrastructure, and available orders.</p>
+          </div>
+        </aside>
+      </div>
+
+      <nav class="command-bar" aria-label="Command toolbar">
+        <button id="queue-button"><img src="./assets/actionQueueToolbarButton.png" alt=""><span>Queue</span><b id="queue-count">0</b></button>
+        <button id="world-upgrades-button"><img src="./assets/worldUpgradeToolbarButton.png" alt=""><span>World</span></button>
+        <button id="espionage-button"><img src="./assets/spyingToolbarButton.png" alt=""><span>Spying</span></button>
+        <button id="objective-button"><img src="./assets/heroToolbarButton.png" alt=""><span>General</span></button>
+        <button id="save-button"><img src="./assets/mainMenuToolbarButton.png" alt=""><span>Save</span></button>
+        <button id="end-turn-button" class="end-turn"><span>End Turn</span><small>Resolve orders</small></button>
+      </nav>
+    </section>
+
+    <section id="manual-screen" class="screen document-screen" aria-labelledby="manual-title">
+      <header><button class="icon-button" data-screen="menu-screen" aria-label="Back">←</button><div><p class="eyebrow">Reference</p><h2 id="manual-title">Field Manual</h2></div></header>
+      <article id="manual-content"></article>
+    </section>
+
+    <section id="about-screen" class="screen document-screen" aria-labelledby="about-title">
+      <header><button class="icon-button" data-screen="menu-screen" aria-label="Back">←</button><div><p class="eyebrow">Archive record</p><h2 id="about-title">Preservation Notes</h2></div></header>
+      <article>
+        <p>This is a clean-room, browser-native recreation built from static inspection of the preserved Wargame 1.5.1 IPA. The original ARM executable is not included in or executed by this web app.</p>
+        <p>The six faction records, all 91 country records, world geometry, adjacency, starting forces, unit balance, upgrade costs, localization, and artwork were recovered from the archived resources. Apple-specific PNGs were normalized into standard browser PNGs while the source files remain untouched in the preservation folder.</p>
+        <p>Original credits: Design &amp; programming — Jérémie Di Prizio and Stéphane Di Prizio. General design &amp; gameplay — Mathieu Di Prizio. Additional artwork &amp; game design — Benoît Leygue.</p>
+        <p>This preservation edition stores campaigns only in your browser. It makes no network requests during play.</p>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="command-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-frame">
+      <header><div><p id="dialog-kicker" class="eyebrow"></p><h2 id="dialog-title"></h2></div><button type="button" class="dialog-close" aria-label="Close">×</button></header>
+      <div id="dialog-content" class="dialog-content"></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="ending" class="ending" hidden>
+    <div><p class="eyebrow">Campaign complete</p><h2 id="ending-title"></h2><p id="ending-copy"></p><button id="ending-menu" class="primary-button">Return to main menu</button></div>
+  </div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

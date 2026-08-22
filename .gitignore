@@ -1,0 +1,7 @@
+preservation/qa/edge-*/
+tools/vendor/
+
+# Retained locally for archival research; never publish these iOS packages.
+/Wargame_1.5.1_ios_3.0.zip
+/Wargame_1.5.1_ios_3.0/
+/preservation/source/ipa/

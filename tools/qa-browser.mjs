@@ -1,0 +1,182 @@
+#!/usr/bin/env node
+
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
+
+const edgePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+const url = process.argv[2] || "http://127.0.0.1:4317/";
+const outputDirectory = path.resolve(process.argv[3] || "preservation/qa");
+const debugPort = await new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once("error", reject);
+  probe.listen(0, "127.0.0.1", () => {
+    const { port } = probe.address();
+    probe.close(() => resolve(port));
+  });
+});
+fs.mkdirSync(outputDirectory, { recursive: true });
+const profileDirectory = path.join(outputDirectory, `edge-cdp-profile-${process.pid}`);
+
+const edge = spawn(edgePath, [
+  "--headless=new",
+  "--disable-gpu",
+  "--hide-scrollbars",
+  `--remote-debugging-port=${debugPort}`,
+  `--user-data-dir=${profileDirectory}`,
+  "--window-size=1440,900",
+  url,
+], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+
+let browserErrors = "";
+edge.stderr.on("data", (chunk) => { browserErrors += chunk.toString(); });
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function findPage() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      const pages = await fetch(`http://127.0.0.1:${debugPort}/json/list`).then((response) => response.json());
+      const page = pages.find((item) => item.type === "page" && item.url.startsWith(url));
+      if (page) return page;
+    } catch {}
+    await delay(100);
+  }
+  throw new Error(`Edge debugging endpoint did not start. ${browserErrors}`);
+}
+
+const page = await findPage();
+const socket = new WebSocket(page.webSocketDebuggerUrl);
+await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
+let commandId = 0;
+const pending = new Map();
+const runtimeErrors = [];
+socket.addEventListener("close", () => {
+  for (const { reject } of pending.values()) reject(new Error("Edge debugging connection closed."));
+  pending.clear();
+});
+socket.addEventListener("message", (event) => {
+  const message = JSON.parse(event.data);
+  if (message.id && pending.has(message.id)) {
+    const { resolve, reject } = pending.get(message.id);
+    pending.delete(message.id);
+    if (message.error) reject(new Error(message.error.message)); else resolve(message.result);
+  }
+  if (message.method === "Runtime.exceptionThrown") runtimeErrors.push(message.params.exceptionDetails.text);
+  if (message.method === "Log.entryAdded" && ["error", "warning"].includes(message.params.entry.level)) runtimeErrors.push(message.params.entry.text);
+});
+
+function command(method, params = {}) {
+  const id = ++commandId;
+  socket.send(JSON.stringify({ id, method, params }));
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+
+async function evaluate(expression) {
+  const result = await command("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+  return result.result.value;
+}
+
+async function screenshot(name) {
+  const result = await command("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, fromSurface: true });
+  fs.writeFileSync(path.join(outputDirectory, name), Buffer.from(result.data, "base64"));
+}
+
+await command("Page.enable");
+await command("Runtime.enable");
+await command("Log.enable");
+await command("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+for (let attempt = 0; attempt < 80; attempt += 1) {
+  if (await evaluate("Boolean(document.querySelector('#new-game-button'))")) break;
+  await delay(100);
+}
+await delay(800);
+
+await evaluate("document.querySelector('#new-game-button').click()");
+await delay(250);
+await screenshot("setup.png");
+const setup = await evaluate(`({
+  active: document.querySelector('.screen.active')?.id,
+  factions: document.querySelectorAll('.faction-option').length,
+  objectives: document.querySelectorAll('#objective-select option').length
+})`);
+
+await evaluate("document.querySelector('#setup-form').requestSubmit()");
+await delay(800);
+await screenshot("game-start.png");
+const start = await evaluate(`({
+  active: document.querySelector('.screen.active')?.id,
+  year: document.querySelector('#status-year')?.textContent,
+  country: document.querySelector('.country-name')?.textContent,
+  canvas: [document.querySelector('#world-map')?.width, document.querySelector('#world-map')?.height],
+  cash: document.querySelector('#status-cash')?.textContent
+})`);
+
+const mapTargets = await evaluate(`(async () => {
+  const data = await fetch('./data/game-data.json').then((response) => response.json());
+  const rect = document.querySelector('#world-map').getBoundingClientRect();
+  const [halfLatitude, halfLongitude] = data.map.halfSize;
+  const point = (name) => {
+    const country = data.map.countries.find((item) => item.name === name);
+    const indices = data.map.indices.slice(country.indexStart, country.indexStart + 3);
+    const triangle = indices.map((index) => data.map.vertices[index]);
+    const vertex = [
+      triangle.reduce((sum, item) => sum + item[0], 0) / 3,
+      triangle.reduce((sum, item) => sum + item[1], 0) / 3
+    ];
+    return {
+      x: rect.left + 18 + (halfLongitude - vertex[1]) / (halfLongitude * 2) * (rect.width - 36),
+      y: rect.top + 18 + (halfLatitude - vertex[0]) / (halfLatitude * 2) * (rect.height - 36)
+    };
+  };
+  return { russia: point('RUSSIA'), unitedStates: point('UNITED_STATES') };
+})()`);
+async function clickMapPoint(point) {
+  await evaluate(`document.querySelector('#world-map').dispatchEvent(new PointerEvent('pointerup', {
+    clientX: ${JSON.stringify(point.x)}, clientY: ${JSON.stringify(point.y)}, pointerId: 1, bubbles: true
+  }))`);
+  await delay(100);
+}
+await clickMapPoint(mapTargets.russia);
+const selectedRussia = await evaluate("document.querySelector('.country-name')?.textContent");
+if (selectedRussia !== "Russia") throw new Error(`Corrected Russia hit region selected ${selectedRussia} at ${JSON.stringify(mapTargets.russia)}.`);
+await clickMapPoint(mapTargets.unitedStates);
+const selectedUnitedStates = await evaluate("document.querySelector('.country-name')?.textContent");
+if (selectedUnitedStates !== "United States") throw new Error(`Corrected U.S. hit region selected ${selectedUnitedStates} at ${JSON.stringify(mapTargets.unitedStates)}.`);
+const mapSelection = { selectedRussia, selectedUnitedStates };
+
+await evaluate("document.querySelector('#buy-action').click()");
+await delay(120);
+const dialog = await evaluate(`({
+  open: document.querySelector('#command-dialog').open,
+  title: document.querySelector('#dialog-title').textContent,
+  units: document.querySelectorAll('#buy-unit option').length,
+  hasQuantity: Boolean(document.querySelector('#buy-quantity')),
+  content: document.querySelector('#dialog-content').textContent
+})`);
+if (!dialog.hasQuantity) throw new Error(`Buy dialog failed to render: ${JSON.stringify({ dialog, runtimeErrors })}`);
+await evaluate("document.querySelector('#buy-quantity').value='1'; document.querySelector('#buy-form').requestSubmit()");
+await delay(120);
+const queued = await evaluate("document.querySelector('#queue-count').textContent");
+await evaluate("document.querySelector('#end-turn-button').click()");
+await delay(500);
+await screenshot("game-after-turn.png");
+const afterTurn = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, cash: document.querySelector('#status-cash').textContent })`);
+
+await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+await evaluate("window.dispatchEvent(new Event('resize'))");
+await delay(350);
+await screenshot("game-mobile.png");
+const mobile = await evaluate(`({
+  viewport: [innerWidth, innerHeight],
+  bodyWidth: document.body.scrollWidth,
+  panelVisible: document.querySelector('#country-panel').classList.contains('has-selection'),
+  canvasWidth: Math.round(document.querySelector('#world-map').getBoundingClientRect().width)
+})`);
+
+console.log(JSON.stringify({ setup, start, mapSelection, dialog, queued, afterTurn, mobile, runtimeErrors }, null, 2));
+await command("Browser.close").catch(() => {});
+await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
+try { fs.rmSync(profileDirectory, { recursive: true, force: true }); } catch {}
+if (runtimeErrors.length) process.exitCode = 1;

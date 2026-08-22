@@ -1,0 +1,24 @@
+* text=auto
+
+*.css text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.mjs text eol=lf
+*.py text eol=lf
+*.webmanifest text eol=lf
+*.xml text eol=lf
+*.yml text eol=lf
+
+*.caf binary
+*.ipa binary
+*.jpg binary
+*.mcp binary
+*.nib binary
+*.plist binary
+*.png binary
+*.sqlite binary
+*.torrent binary
+*.zip binary
+preservation/source/ipa/Payload/Wargame.app/Wargame binary
