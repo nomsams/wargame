@@ -22,7 +22,11 @@ const profileDirectory = path.join(outputDirectory, `edge-cdp-profile-${process.
 const edge = spawn(edgePath, [
   "--headless=new",
   "--disable-gpu",
+  "--disable-background-mode",
+  "--edge-skip-compat-layer-relaunch",
   "--hide-scrollbars",
+  "--no-default-browser-check",
+  "--no-first-run",
   `--remote-debugging-port=${debugPort}`,
   `--user-data-dir=${profileDirectory}`,
   "--window-size=1440,900",
@@ -436,8 +440,23 @@ await screenshot("dialog-mobile.png");
 console.log(JSON.stringify({ setup, start, saveTransfer, saveDownload, saveImport, saveImportLoaded, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, mobileForces, settingsDialog, mobileSave, exitDialog, mobileDialog, runtimeErrors }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
-  if (!edge.killed) edge.kill();
-  await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
-  try { fs.rmSync(profileDirectory, { recursive: true, force: true }); } catch {}
+  if (process.platform === "win32" && edge.pid) {
+    const terminator = spawn("taskkill", ["/pid", String(edge.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    await Promise.race([new Promise((resolve) => terminator.once("exit", resolve)), delay(4000)]);
+  } else {
+    if (!edge.killed) edge.kill();
+    await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
+  }
+  if (process.platform === "win32") {
+    const remover = spawn("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "& { param([string]$target) Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }",
+      profileDirectory,
+    ], { stdio: "ignore", windowsHide: true });
+    const removalCode = await Promise.race([new Promise((resolve) => remover.once("exit", resolve)), delay(10000).then(() => null)]);
+    if (removalCode !== 0) throw new Error(`Could not remove temporary browser profile ${profileDirectory}.`);
+  } else fs.rmSync(profileDirectory, { recursive: true, force: true });
 }
 if (runtimeErrors.length) process.exitCode = 1;
