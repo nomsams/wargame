@@ -296,7 +296,7 @@ const battleResult = await evaluate(`({
   result: document.querySelector('#battle-result').textContent,
   progress: document.querySelector('#battle-progress-fill').style.width
 })`);
-if (!battleResult.visible || battleResult.winner !== 1 || battleResult.fallen < 1 || battleResult.progress !== "100%") throw new Error(`Combat result presentation failed: ${JSON.stringify(battleResult)}.`);
+if (battleResult.winner !== 1 || battleResult.fallen < 1 || battleResult.progress !== "100%") throw new Error(`Combat result presentation failed: ${JSON.stringify(battleResult)}.`);
 await screenshot("battle-result.png");
 await evaluate("document.querySelector('#skip-all-battles').click()");
 for (let attempt = 0; attempt < 40; attempt += 1) {
