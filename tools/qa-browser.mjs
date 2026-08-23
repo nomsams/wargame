@@ -89,10 +89,15 @@ await command("Page.enable");
 await command("Runtime.enable");
 await command("Log.enable");
 await command("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-for (let attempt = 0; attempt < 80; attempt += 1) {
-  if (await evaluate("Boolean(document.querySelector('#new-game-button'))")) break;
+let appReady = false;
+for (let attempt = 0; attempt < 300; attempt += 1) {
+  if (await evaluate("Boolean(document.querySelector('#new-game-button')) && !document.querySelector('#loading')")) {
+    appReady = true;
+    break;
+  }
   await delay(100);
 }
+if (!appReady) throw new Error(`Wargame did not finish loading within 30 seconds. ${JSON.stringify({ runtimeErrors, browserErrors })}`);
 await delay(800);
 
 await evaluate("document.querySelector('#new-game-button').click()");
