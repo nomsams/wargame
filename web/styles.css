@@ -83,6 +83,8 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid var(--line); bor
 .country-name { margin: 4px 0; font-size: 1.55rem; }
 .country-resource { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .78rem; }
 .country-resource img { width: 24px; height: 24px; object-fit: contain; }
+.country-resource span, .country-resource small { display: block; }
+.country-resource small { margin-top: 2px; color: #e9bd68; font-size: .67rem; }
 .panel-section { padding: 15px 18px; border-bottom: 1px solid var(--line); }
 .panel-section h3 { margin: 0 0 11px; color: #8fa7bb; font-size: .7rem; letter-spacing: .13em; text-transform: uppercase; }
 .unit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -131,6 +133,22 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
 .dialog-section-title { margin: 24px 0 8px; color: var(--orange); font-size: .82rem; letter-spacing: .12em; text-transform: uppercase; }
 .dialog-section-title:first-child { margin-top: 0; }
 .section-help { margin: 0 0 12px; color: var(--muted); font-size: .82rem; }
+.uncontrolled-option { font-style: italic; }
+.controlled-option { font-style: normal; }
+.attack-planner-help { margin-top: 13px; }
+.attack-commitments { display: grid; gap: 7px; margin-bottom: 16px; }
+.attack-commitments > div { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(150px, 2fr) auto; align-items: center; gap: 10px; border: 1px solid var(--line); background: rgba(255,255,255,.025); padding: 10px 12px; }
+.attack-commitments span { color: var(--muted); font-size: .76rem; }
+.attack-commitments button { min-height: 38px; border: 1px solid #477b91; background: #16384d; color: #c1e7f6; }
+.force-overview { display: grid; gap: 8px; }
+.force-country { display: grid; grid-template-columns: minmax(145px, 1.15fr) 3fr; align-items: stretch; border: 1px solid var(--line); background: rgba(255,255,255,.025); }
+.force-country > button { border: 0; border-right: 1px solid var(--line); background: rgba(39,65,88,.45); padding: 11px; color: white; font-weight: 800; text-align: left; }
+.force-country > div { display: grid; grid-template-columns: repeat(5, minmax(54px, 1fr)); }
+.force-country span { min-width: 0; display: grid; grid-template-columns: 21px 1fr; align-items: center; gap: 3px; padding: 8px 5px; border-right: 1px solid rgba(255,255,255,.055); }
+.force-country span:last-child { border: 0; }
+.force-country img { width: 20px; height: 20px; object-fit: contain; }
+.force-country b, .force-country small { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.force-country small { grid-column: 1 / -1; color: var(--muted); font-size: .56rem; }
 .queue-list, .log-list { display: grid; gap: 8px; }
 .queue-item, .log-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.025); padding: 11px 13px; }
 .queue-item span, .log-item span { color: var(--muted); font-size: .74rem; }
@@ -151,14 +169,14 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
 .toast { position: fixed; z-index: 30; left: 50%; bottom: calc(var(--toolbar-height) + 20px); max-width: min(540px, calc(100% - 28px)); padding: 11px 16px; border: 1px solid #536f86; border-radius: 4px; background: rgba(9,17,27,.96); color: white; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 18px); transition: 180ms ease; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.bad { border-color: #a84b3c; color: #ffb8ad; }
-.battle-sequence { position: fixed; z-index: 45; inset: 0; display: grid; align-items: end; overflow: hidden; background: rgba(2,7,13,.42); }
+.battle-sequence { position: fixed; z-index: 45; inset: 0; display: grid; align-items: end; overflow: hidden; background: transparent; }
 .battle-sequence[hidden] { display: none; }
-.battle-backdrop { position: absolute; inset: 0; background: radial-gradient(circle at center, transparent 0 32%, rgba(1,5,10,.28) 64%, rgba(1,4,8,.88)), url("./assets/combatProgressionBackground.png") center / cover; backdrop-filter: saturate(.7) contrast(1.14); cursor: pointer; }
-.battle-hud { position: relative; width: min(920px, calc(100% - 32px)); margin: 0 auto clamp(20px, 5vh, 54px); padding: clamp(18px, 3vw, 30px); border: 1px solid #66809a; border-top: 4px solid var(--orange); background: linear-gradient(135deg, rgba(15,27,41,.97), rgba(5,11,18,.97)); box-shadow: 0 24px 80px rgba(0,0,0,.72); }
+.battle-backdrop { position: absolute; inset: 0; background: radial-gradient(circle at center, transparent 0 40%, rgba(1,5,10,.08) 70%, rgba(1,4,8,.34)); cursor: pointer; }
+.battle-hud { position: relative; width: min(820px, calc(100% - 32px)); margin: 0 auto clamp(14px, 3vh, 30px); padding: clamp(15px, 2.2vw, 23px); border: 1px solid rgba(130,169,198,.72); border-top: 4px solid var(--orange); background: linear-gradient(135deg, rgba(15,27,41,.56), rgba(5,11,18,.48)); box-shadow: 0 16px 50px rgba(0,0,0,.46); backdrop-filter: blur(1.5px); }
 .battle-hud h2 { margin: 3px 0 6px; font-size: clamp(1.7rem, 5vw, 3rem); text-transform: uppercase; }
 .battle-route { min-height: 1.4em; margin: 0 0 16px; color: #b8c8d2; font-size: .8rem; }
 .battle-factions { display: flex; align-items: flex-end; justify-content: center; gap: clamp(8px, 2vw, 18px); min-height: 128px; margin: 12px 0; }
-.battle-faction { position: relative; width: min(150px, 23vw); min-height: 112px; display: grid; place-items: center; align-content: center; gap: 4px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--faction-color) 72%, #a9c3d4); border-bottom: 5px solid var(--faction-color); background: linear-gradient(160deg, color-mix(in srgb, var(--faction-color) 38%, #142030), #080e16); text-align: center; transform-origin: 50% 100%; transition: transform 650ms cubic-bezier(.55,-.2,.7,.35), opacity 550ms, filter 550ms, box-shadow 350ms; }
+.battle-faction { position: relative; width: min(150px, 23vw); min-height: 106px; display: grid; place-items: center; align-content: center; gap: 4px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--faction-color) 72%, #a9c3d4); border-bottom: 5px solid var(--faction-color); background: linear-gradient(160deg, color-mix(in srgb, var(--faction-color) 30%, rgba(20,32,48,.62)), rgba(8,14,22,.5)); text-align: center; transform-origin: 50% 100%; transition: transform 650ms cubic-bezier(.55,-.2,.7,.35), opacity 550ms, filter 550ms, box-shadow 350ms; }
 .battle-faction img { width: 52px; height: 42px; object-fit: contain; filter: drop-shadow(0 4px 4px rgba(0,0,0,.5)); }
 .battle-faction strong { max-width: 92%; overflow: hidden; font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
 .battle-faction span { color: var(--muted); font-size: .65rem; }
@@ -227,6 +245,13 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
   .action-card button { min-height: 44px; }
   .queue-item { align-items: stretch; flex-direction: column; }
   .queue-item button { min-height: 44px; }
+  .attack-commitments > div { grid-template-columns: 1fr; }
+  .attack-commitments button { min-height: 44px; }
+  .force-country { grid-template-columns: 1fr; }
+  .force-country > button { min-height: 44px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .force-country > div { grid-template-columns: repeat(5, minmax(48px, 1fr)); }
+  .force-country span { grid-template-columns: 1fr; justify-items: center; padding: 8px 3px; text-align: center; }
+  .force-country small { display: none; }
   .battle-hud { width: calc(100% - 16px); margin-bottom: calc(var(--toolbar-height) + 8px); padding: 16px 12px; }
   .battle-route { max-height: 3.2em; overflow: hidden; }
   .battle-factions { min-height: 100px; }

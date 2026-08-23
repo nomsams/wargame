@@ -57,7 +57,7 @@ Some high-level behavior could not be recovered perfectly without executing the 
 - combat uses recovered unit strength plus bounded seeded battlefield variance;
 - actions resolve in construction, buying, then movement order at year end;
 - the AI uses the recovered map and balance data with deterministic heuristics;
-- resource-specific purchase discounts are inferred from the original resource manager and descriptions;
+- archived `ResourceManager` methods were statically disassembled to restore Heavy Industry planes, Finance cash, Agriculture troops, Ore missiles, Fishing ships, Petroleum unit discounts, Power Plant doubling, and ten-country capital synergy awards;
 - queued ships carry one troop each, or two with the recovered Sea Carrier unit choice, matching the original localization and tutorial instructions;
 - network/Bluetooth/Ladder services are intentionally not contacted or emulated;
 - selected battle CAF effects are converted ahead of time to browser-native PCM; the original CAF files remain only in the excluded archive.

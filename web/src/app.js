@@ -5,10 +5,12 @@ import {
   availableUpgrades,
   boardTroops,
   buyWorldUpgrade,
+  canBuyIn,
   canReach,
   cancelAction,
   checkVictory,
   chooseNavalDoctrine,
+  countryResourceBonus,
   displayCountry,
   endTurn,
   maxPurchasableUnits,
@@ -70,6 +72,23 @@ function localized(key, fallback = key) {
 
 function countryLabel(name) {
   return localized(name, displayCountry(name));
+}
+
+function countriesAlphabetically(countries = gameData.countries) {
+  return [...countries].sort((first, second) => countryLabel(first.name).localeCompare(countryLabel(second.name), undefined, { sensitivity: "base" }));
+}
+
+function resourceBonusText(countryName, revealInfrastructure = true) {
+  const bonus = countryResourceBonus(gameData, gameState, countryName);
+  if (!revealInfrastructure && gameState.countries[countryName].upgrades.includes(15)) {
+    bonus.costDiscount /= 2;
+    bonus.cash /= 2;
+    for (const unitType of Object.keys(bonus.units)) bonus.units[unitType] /= 2;
+  }
+  if (bonus.costDiscount) return `${Math.round(bonus.costDiscount * 100)}% off ships, planes & missiles`;
+  if (bonus.cash) return `$${bonus.cash}/year`;
+  const [unitType, quantity] = Object.entries(bonus.units)[0] || [];
+  return unitType ? `${quantity} ${quantity === 1 ? UNIT_TYPES[unitType].singular : UNIT_TYPES[unitType].label.toLowerCase()}/year` : "No yearly bonus";
 }
 
 function readPreferences() {
@@ -344,15 +363,17 @@ function renderCountryPanel() {
   const upgradePills = view.upgrades?.length ? view.upgrades.map((id) => `<span>${escapeHtml(upgradeById(id)?.short || upgradeById(id)?.title || `Upgrade ${id}`)}</span>`).join("") : `<span>None built</span>`;
   const own = country.owner === gameState.playerFaction;
   const hostile = country.owner && !own;
+  const attackable = !own && country.nukedUntil <= gameState.year;
+  const canPurchaseHere = own && canBuyIn(gameData, gameState, gameState.playerFaction, selectedCountry);
   const boardableShips = own ? gameState.queue.filter((action) => action.type === "move" && action.unitType === "ships"
     && action.faction === gameState.playerFaction && action.from === selectedCountry && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0) : [];
   panel.style.setProperty("--owner", ownerMeta.color);
   panel.style.setProperty("--accent", ownerMeta.accent);
   panel.innerHTML = `
-    <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt="">${escapeHtml(resource)} · $${source.cashPerTurn}/year</div></div>
+    <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><span>${escapeHtml(resource)} · $${source.cashPerTurn}/year<small>${escapeHtml(resourceBonusText(selectedCountry, Boolean(view.upgrades)))}</small></span></div></div>
     <div class="country-actions">
-      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action">Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}` : ""}
-      ${hostile ? `<button id="spy-country-action">Spy</button><button id="attack-help-action" class="attack">How to attack</button>` : ""}
+      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action" ${canPurchaseHere ? "" : "disabled title=\"Build a Supply Center to buy units here\""}>Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}` : ""}
+      ${hostile ? `<button id="spy-country-action">Spy</button>` : ""}${attackable ? `<button id="attack-country-action" class="attack">Attack Country</button>` : ""}
     </div>
     <section class="panel-section"><h3>Garrison</h3>${unitsMarkup(view)}</section>
     <section class="panel-section"><h3>Infrastructure</h3>${view.upgrades ? `<div class="upgrade-pills">${upgradePills}</div>` : `<div class="redacted">Infrastructure classified</div>`}</section>
@@ -364,7 +385,7 @@ function renderCountryPanel() {
   $("#country-info-action")?.addEventListener("click", () => openCountryInfo(selectedCountry));
   $("#board-action")?.addEventListener("click", () => openBoardTroopsDialog(boardableShips));
   $("#spy-country-action")?.addEventListener("click", () => openSpyDialog(selectedCountry));
-  $("#attack-help-action")?.addEventListener("click", () => notify("Select one of your countries, choose Move / Attack, then target this country."));
+  $("#attack-country-action")?.addEventListener("click", () => openAttackTargetDialog(selectedCountry));
 }
 
 function renderStatus() {
@@ -442,7 +463,10 @@ function openMoveDialog(fromName) {
     const updateTargets = () => {
       const unitType = $("#move-unit", root).value;
       const target = $("#move-target", root);
-      target.innerHTML = gameData.countries.filter((country) => canReach(gameData, gameState, gameState.playerFaction, fromName, country.name, unitType)).map((country) => `<option value="${country.name}">${escapeHtml(countryLabel(country.name))}${gameState.countries[country.name].owner === gameState.playerFaction ? " — move" : " — attack"}</option>`).join("");
+      target.innerHTML = countriesAlphabetically(gameData.countries.filter((country) => canReach(gameData, gameState, gameState.playerFaction, fromName, country.name, unitType))).map((country) => {
+        const controlled = gameState.countries[country.name].owner === gameState.playerFaction;
+        return `<option value="${country.name}" class="${controlled ? "controlled-option" : "uncontrolled-option"}">${escapeHtml(countryLabel(country.name))}${controlled ? " — move" : " — attack"}</option>`;
+      }).join("");
       const available = availableUnitCount(gameState, gameState.playerFaction, fromName, unitType);
       const quantity = $("#move-quantity", root);
       quantity.max = available;
@@ -464,7 +488,67 @@ function openMoveDialog(fromName) {
   });
 }
 
-function openBoardTroopsDialog(actions) {
+function attackSourcesFor(targetName) {
+  return countriesAlphabetically(gameData.countries.filter((country) => gameState.countries[country.name].owner === gameState.playerFaction
+    && Object.keys(UNIT_TYPES).some((unitType) => availableUnitCount(gameState, gameState.playerFaction, country.name, unitType) > 0
+      && canReach(gameData, gameState, gameState.playerFaction, country.name, targetName, unitType))));
+}
+
+function openAttackTargetDialog(targetName) {
+  const target = gameState.countries[targetName];
+  if (!target || target.owner === gameState.playerFaction) return notify("Select a country outside your control to plan an attack.", "bad");
+  const sources = attackSourcesFor(targetName);
+  if (!sources.length) return notify(`No controlled country has forces able to reach ${countryLabel(targetName)}.`, "bad");
+  const queuedForTarget = () => gameState.queue.filter((action) => action.type === "move" && action.faction === gameState.playerFaction && action.to === targetName);
+  openDialog("Target-first operations", `Attack ${countryLabel(targetName)}`, `<div id="attack-planner"></div>`, (root) => {
+    const render = (preferredSource = null) => {
+      const currentSources = attackSourcesFor(targetName);
+      const queued = queuedForTarget();
+      const sourceOptions = currentSources.map((country) => `<option value="${country.name}" ${country.name === preferredSource ? "selected" : ""}>${escapeHtml(countryLabel(country.name))}</option>`).join("");
+      const queuedMarkup = queued.length ? `<h3 class="dialog-section-title">Forces already committed</h3><div class="attack-commitments">${queued.map((action) => `<div><span>${escapeHtml(countryLabel(action.from))}</span><strong>${action.quantity} ${UNIT_TYPES[action.unitType].label.toLowerCase()}${action.carriedTroops ? ` + ${action.carriedTroops} troops aboard` : ""}</strong>${action.unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0 ? `<button type="button" data-attack-board="${action.id}">Board troops</button>` : ""}</div>`).join("")}</div>` : "";
+      $("#attack-planner", root).innerHTML = `${queuedMarkup}<form id="attack-form" class="dialog-form"><label>Attack from<select id="attack-source">${sourceOptions}</select></label><label>Unit type<select id="attack-unit"></select></label><label>Quantity<input id="attack-quantity" type="number" inputmode="numeric" min="1" step="1" value="1"></label><p id="attack-help" class="order-summary"></p><button id="attack-submit" class="primary-button" type="submit">Queue this force</button></form><p class="section-help attack-planner-help">Queue forces from several countries here; close the planner when the attack is ready.</p>`;
+      const sourceSelect = $("#attack-source", root);
+      const unitSelect = $("#attack-unit", root);
+      const quantity = $("#attack-quantity", root);
+      const updateUnits = () => {
+        const sourceName = sourceSelect.value;
+        const units = Object.entries(UNIT_TYPES).filter(([unitType]) => availableUnitCount(gameState, gameState.playerFaction, sourceName, unitType) > 0
+          && canReach(gameData, gameState, gameState.playerFaction, sourceName, targetName, unitType));
+        unitSelect.innerHTML = units.map(([unitType, meta]) => `<option value="${unitType}">${meta.label} (${availableUnitCount(gameState, gameState.playerFaction, sourceName, unitType)} available)</option>`).join("");
+        updateQuantity();
+      };
+      const updateQuantity = () => {
+        const available = unitSelect.value ? availableUnitCount(gameState, gameState.playerFaction, sourceSelect.value, unitSelect.value) : 0;
+        quantity.max = available;
+        if (Number(quantity.value) > available || Number(quantity.value) < 1) quantity.value = Math.max(1, available);
+        $("#attack-submit", root).disabled = !available;
+        $("#attack-help", root).textContent = available ? `${available} uncommitted ${UNIT_TYPES[unitSelect.value].label.toLowerCase()} can attack from ${countryLabel(sourceSelect.value)}.` : "No reachable units remain in this country.";
+      };
+      sourceSelect.addEventListener("change", updateUnits);
+      unitSelect.addEventListener("change", updateQuantity);
+      $("#attack-form", root).addEventListener("submit", (event) => {
+        event.preventDefault();
+        const sourceName = sourceSelect.value;
+        const unitType = unitSelect.value;
+        let queuedAction;
+        if (withRules(() => { queuedAction = queueMove(gameData, gameState, gameState.playerFaction, sourceName, targetName, unitType, quantity.value); })) {
+          notify(`${UNIT_TYPES[unitType].label} committed from ${countryLabel(sourceName)}. Add another force or close the planner.`, "good");
+          if (unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, queuedAction.id) > 0) {
+            openBoardTroopsDialog([queuedAction], () => openAttackTargetDialog(targetName));
+          } else render(sourceName);
+        }
+      });
+      $$('[data-attack-board]', root).forEach((button) => button.addEventListener("click", () => {
+        const action = gameState.queue.find((item) => item.id === button.dataset.attackBoard);
+        if (action) openBoardTroopsDialog([action], () => openAttackTargetDialog(targetName));
+      }));
+      updateUnits();
+    };
+    render(sources[0].name);
+  });
+}
+
+function openBoardTroopsDialog(actions, onDone = null) {
   const routes = actions.filter((action) => availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0);
   if (!routes.length) return notify("No queued ships have free troop capacity.", "bad");
   const multiplier = navalTransportMultiplier(gameState, gameState.playerFaction);
@@ -479,10 +563,12 @@ function openBoardTroopsDialog(actions) {
       $("#board-help", root).textContent = `${capacity} troop space${capacity === 1 ? "" : "s"} available on this fleet.`;
     };
     $("#board-route", root).addEventListener("change", update);
-    $("#board-later", root).addEventListener("click", closeDialog);
+    $("#board-later", root).addEventListener("click", () => { if (onDone) onDone(); else closeDialog(); });
     $("#board-form", root).addEventListener("submit", (event) => {
       event.preventDefault();
-      if (withRules(() => boardTroops(gameState, gameState.playerFaction, $("#board-route", root).value, $("#board-quantity", root).value))) closeDialog();
+      if (withRules(() => boardTroops(gameState, gameState.playerFaction, $("#board-route", root).value, $("#board-quantity", root).value))) {
+        if (onDone) onDone(); else closeDialog();
+      }
     });
     update();
   });
@@ -533,14 +619,14 @@ function openWorldUpgrades() {
 function openCountryInfo(countryName) {
   const source = gameData.countries.find((country) => country.name === countryName);
   const state = gameState.countries[countryName];
-  openDialog("Country intelligence", countryLabel(countryName), `<div class="dialog-grid"><article class="action-card"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><div><h3>${RESOURCE_NAMES[source.countryResource]}</h3><p>${escapeHtml(localized(`${RESOURCE_NAMES[source.countryResource]} Description`, "Strategic national resource."))}</p><span class="price">Base income $${source.cashPerTurn}/year</span></div></article><article class="action-card"><img src="${asset("countryGarnisonImage.png")}" alt=""><div><h3>Operational borders</h3><p>${source.adjoiningCountries.map(countryLabel).join(" · ")}</p><span>${source.hasSeaBorder ? "Sea access available" : "Landlocked"}</span></div></article></div><div class="intel-panel">${state.nukedUntil > gameState.year ? `Nuclear fallout prevents occupation until ${state.nukedUntil}.` : "Country is operational."}</div>`);
+  openDialog("Country intelligence", countryLabel(countryName), `<div class="dialog-grid"><article class="action-card"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><div><h3>${RESOURCE_NAMES[source.countryResource]}</h3><p>${escapeHtml(localized(`${RESOURCE_NAMES[source.countryResource]} Description`, "Strategic national resource."))}</p><span class="price">${escapeHtml(resourceBonusText(countryName))} · Base income $${source.cashPerTurn}/year</span></div></article><article class="action-card"><img src="${asset("countryGarnisonImage.png")}" alt=""><div><h3>Operational borders</h3><p>${countriesAlphabetically(source.adjoiningCountries.map((name) => gameData.countries.find((country) => country.name === name)).filter(Boolean)).map((country) => countryLabel(country.name)).join(" · ")}</p><span>${source.hasSeaBorder ? "Sea access available" : "Landlocked"}</span></div></article></div><div class="intel-panel">${state.nukedUntil > gameState.year ? `Nuclear fallout prevents occupation until ${state.nukedUntil}.` : "Country is operational."}</div>`);
 }
 
 function openSpyDialog(defaultTarget = null) {
-  const targets = gameData.countries.filter((country) => {
+  const targets = countriesAlphabetically(gameData.countries.filter((country) => {
     const owner = gameState.countries[country.name].owner;
     return owner && owner !== gameState.playerFaction;
-  });
+  }));
   if (!targets.length) return notify("No enemy countries remain.");
   const options = targets.map((country) => `<option value="${country.name}" ${country.name === defaultTarget ? "selected" : ""}>${escapeHtml(countryLabel(country.name))}</option>`).join("");
   const faction = gameState.factions[gameState.playerFaction];
@@ -572,9 +658,20 @@ function openQueue() {
 
 function openObjective() {
   const faction = gameState.factions[gameState.playerFaction];
-  const owned = Object.values(gameState.countries).filter((country) => country.owner === gameState.playerFaction).length;
+  const controlledCountries = countriesAlphabetically(gameData.countries.filter((country) => gameState.countries[country.name].owner === gameState.playerFaction));
+  const owned = controlledCountries.length;
+  const forceCards = controlledCountries.map((country) => {
+    const units = gameState.countries[country.name].units;
+    return `<article class="force-country"><button type="button" data-force-country="${country.name}">${escapeHtml(countryLabel(country.name))}</button><div>${Object.entries(UNIT_TYPES).map(([unitType, meta]) => `<span title="${meta.label}"><img src="${asset(meta.icon)}" alt=""><b>${units[unitType].toLocaleString()}</b><small>${meta.label}</small></span>`).join("")}</div></article>`;
+  }).join("");
   const log = gameState.log.slice(0, 18).map((item) => `<div class="log-item"><span>${item.year}</span><strong>${escapeHtml(item.message)}</strong></div>`).join("");
-  openDialog(faction.general.name, OBJECTIVES[gameState.objective].title, `<p>${escapeHtml(OBJECTIVES[gameState.objective].description)}</p><div class="intel-panel">Rank ${faction.general.level} · ${faction.conquests} conquests · ${owned} countries · $${faction.cash.toLocaleString()}</div><h3>Campaign log</h3><div class="log-list">${log}</div>`);
+  openDialog(faction.general.name, OBJECTIVES[gameState.objective].title, `<p>${escapeHtml(OBJECTIVES[gameState.objective].description)}</p><div class="intel-panel">Rank ${faction.general.level} · ${faction.conquests} conquests · ${owned} countries · $${faction.cash.toLocaleString()}</div><h3 class="dialog-section-title">Controlled-country forces</h3><p class="section-help">Every garrison under your command, sorted A–Z. Select a country name to find it on the map.</p><div class="force-overview">${forceCards}</div><h3 class="dialog-section-title">Campaign log</h3><div class="log-list">${log}</div>`, (root) => {
+    $$('[data-force-country]', root).forEach((button) => button.addEventListener("click", () => {
+      selectedCountry = button.dataset.forceCountry;
+      closeDialog();
+      renderAll();
+    }));
+  });
 }
 
 function openSettings() {
@@ -716,7 +813,7 @@ async function playBattleSequence(events) {
     $("#battle-sequence").classList.remove("battle-clash");
     const playerLost = group.events.some((event) => event.attacker === gameState.playerFaction) && finalOwner !== gameState.playerFaction;
     if (playerLost) playBattleSound("failed", 0.72);
-    if (!battleSkipAll) await waitBattle(resultWasRequested ? 700 : 1050);
+    if (!battleSkipAll) await waitBattle(resultWasRequested ? 1100 : 2200);
     else await delay(100);
   }
   stopBattleAudio();
@@ -732,11 +829,11 @@ function buildManual() {
   $("#manual-content").innerHTML = `
     <p>Wargame is a turn-based strategy game. Every order you plan is queued for the end of the year; espionage is immediate. Expand from your faction's three starting countries, build an economy, and meet your chosen objective.</p>
     <h3>1. Tactical map</h3><p>Colored countries belong to factions; dark countries are neutral. Select one of your countries to move forces, buy units, build infrastructure, or inspect it. Drag the map to pan and use the wheel or zoom controls.</p>
-    <h3>2. Moving, attacking, and naval transport</h3><p>Troops cross adjoining land borders. Ships travel between coastal countries. After queuing a ship movement, board troops onto that fleet from the country panel or Action Queue. Each ship carries one troop, or two after selecting Sea Carrier. Planes, missiles, and commandos can reach distant targets. Moving into friendly territory transfers units; moving into hostile or neutral territory queues an attack.</p>
-    <h3>3. Economy and buying</h3><p>Every controlled country pays cash each year. Units may be bought in a faction's original countries or anywhere with a Supply Center. National resources reduce the cost of related units. Power Plants and faction infrastructure improve income.</p>
+    <h3>2. Moving, attacking, and naval transport</h3><p>Troops cross adjoining land borders. Ships travel between coastal countries. You can plan from either direction: select one of your countries and choose Move / Attack, or select an uncontrolled target and choose Attack Country to commit forces from several source countries. Target lists are sorted A–Z; italic entries are outside your control. After queuing a ship movement, board troops onto that fleet from the country panel, attack planner, or Action Queue. Each ship carries one troop, or two after selecting Sea Carrier. Planes, missiles, and commandos can reach distant targets.</p>
+    <h3>3. Economy, resources, and buying</h3><p>Every controlled country pays cash each year and supplies its recovered national-resource bonus: Heavy Industry produces planes, Finance produces cash, Agriculture troops, Ore missiles, and Fishing ships. Petroleum discounts ships, planes, and missiles. A Power Plant doubles the local resource effect, and controlling more than nine countries with the same resource grants its synergy bonus at your capital. Units may be bought in original faction countries or anywhere with a Supply Center.</p>
     <h3>4. Combat</h3><p>Each faction has the original unit attack, defence, and cost profile recovered from the app. Generals, country defences, bribery, and upgrades modify combat. Battles involving your faction zoom to the contested country and replay with the preserved marching and combat sounds. Use Show result or Skip all to shorten the sequence.</p>
     <h3>5. Upgrades and spying</h3><p>Country upgrades include AWFDS, Supply Centers, Power Plants, and a faction-specific ability. World upgrades unlock decisive faction powers. Intelligence reveals a hidden garrison; Bribery halves its defence for the current year; 00 Agents unlock hits against rival generals.</p>
-    <h3>6. End turn and saves</h3><p>End Turn lets all computer factions plan, then resolves purchases, construction, moves, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order and can also be saved from the toolbar.</p>`;
+    <h3>6. General, forces, end turn, and saves</h3><p>The General view lists every controlled-country garrison A–Z, including troops, ships, planes, missiles, and commandos. End Turn lets all computer factions plan, then resolves purchases, construction, moves, resource grants, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order and can also be saved from the toolbar.</p>`;
 }
 
 function checkEnding() {

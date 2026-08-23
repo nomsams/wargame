@@ -132,7 +132,7 @@ const mapTargets = await evaluate(`(async () => {
       y: rect.top + 18 + (halfLatitude - vertex[0]) / (halfLatitude * 2) * (rect.height - 36)
     };
   };
-  return { russia: point('RUSSIA'), unitedStates: point('UNITED_STATES') };
+  return { russia: point('RUSSIA'), unitedStates: point('UNITED_STATES'), mexico: point('MEXICO') };
 })()`);
 async function clickMapPoint(point) {
   await evaluate(`document.querySelector('#world-map').dispatchEvent(new PointerEvent('pointerup', {
@@ -147,6 +147,38 @@ await clickMapPoint(mapTargets.unitedStates);
 const selectedUnitedStates = await evaluate("document.querySelector('.country-name')?.textContent");
 if (selectedUnitedStates !== "United States") throw new Error(`Corrected U.S. hit region selected ${selectedUnitedStates} at ${JSON.stringify(mapTargets.unitedStates)}.`);
 const mapSelection = { selectedRussia, selectedUnitedStates };
+
+const resourceDisplay = await evaluate("document.querySelector('.country-resource')?.textContent.trim()");
+if (!resourceDisplay.includes('$30/year')) throw new Error(`Recovered Finance bonus is missing from the country panel: ${resourceDisplay}.`);
+
+await evaluate("document.querySelector('#objective-button').click()");
+await delay(120);
+const forceOverview = await evaluate(`(() => {
+  const names = [...document.querySelectorAll('[data-force-country]')].map((button) => button.textContent.trim());
+  return {
+    cards: document.querySelectorAll('.force-country').length,
+    names,
+    unitCounts: document.querySelectorAll('.force-country:first-child span').length,
+    sorted: names.every((name, index) => !index || names[index - 1].localeCompare(name, undefined, { sensitivity: 'base' }) <= 0)
+  };
+})()`);
+if (forceOverview.cards !== 3 || forceOverview.unitCounts !== 5 || !forceOverview.sorted) throw new Error(`Controlled-country force overview failed: ${JSON.stringify(forceOverview)}.`);
+await screenshot("forces-overview.png");
+await evaluate("document.querySelector('.dialog-close').click(); document.querySelector('#move-action').click(); const unit=document.querySelector('#move-unit'); unit.value='planes'; unit.dispatchEvent(new Event('change',{bubbles:true}))");
+await delay(80);
+const targetOrdering = await evaluate(`(() => {
+  const options = [...document.querySelectorAll('#move-target option')];
+  const labels = options.map((option) => option.textContent.replace(/ — (move|attack)$/, ''));
+  return {
+    count: options.length,
+    sorted: labels.every((label, index) => !index || labels[index - 1].localeCompare(label, undefined, { sensitivity: 'base' }) <= 0),
+    controlledRegular: options.filter((option) => option.classList.contains('controlled-option')).every((option) => !option.classList.contains('uncontrolled-option')),
+    uncontrolledItalic: options.filter((option) => option.classList.contains('uncontrolled-option')).every((option) => getComputedStyle(option).fontStyle === 'italic'),
+    uncontrolledCount: options.filter((option) => option.classList.contains('uncontrolled-option')).length
+  };
+})()`);
+if (!targetOrdering.sorted || !targetOrdering.controlledRegular || !targetOrdering.uncontrolledItalic || !targetOrdering.uncontrolledCount) throw new Error(`A–Z target ordering or ownership styling failed: ${JSON.stringify(targetOrdering)}.`);
+await evaluate("document.querySelector('.dialog-close').click()");
 
 await evaluate(`(() => {
   document.querySelector('#move-action').click();
@@ -200,16 +232,38 @@ const persistentUpgrade = await evaluate(`({
 if (!persistentUpgrade.open || persistentUpgrade.queuedLabel !== "Queued ✓") throw new Error(`Upgrade dialog did not remain open with queued state: ${JSON.stringify(persistentUpgrade)}.`);
 await evaluate("document.querySelector('.dialog-close').click()");
 
+await clickMapPoint(mapTargets.mexico);
+await evaluate("document.querySelector('#attack-country-action').click()");
+await delay(120);
+const attackPlanner = await evaluate(`(() => {
+  const sources = [...document.querySelectorAll('#attack-source option')].map((option) => option.textContent.trim());
+  return {
+    title: document.querySelector('#dialog-title').textContent,
+    sources,
+    sorted: sources.every((name, index) => !index || sources[index - 1].localeCompare(name, undefined, { sensitivity: 'base' }) <= 0),
+    targetAction: document.querySelector('#attack-country-action')?.textContent
+  };
+})()`);
+if (attackPlanner.title !== "Attack Mexico" || !attackPlanner.sorted || !attackPlanner.sources.includes("United States")) throw new Error(`Target-first attack planner failed: ${JSON.stringify(attackPlanner)}.`);
+await screenshot("attack-planner.png");
 await evaluate(`(() => {
-  document.querySelector('#move-action').click();
-  const unit = document.querySelector('#move-unit');
+  const source = document.querySelector('#attack-source');
+  source.value = 'UNITED_STATES';
+  source.dispatchEvent(new Event('change', { bubbles: true }));
+  const unit = document.querySelector('#attack-unit');
   unit.value = 'troops';
   unit.dispatchEvent(new Event('change', { bubbles: true }));
-  document.querySelector('#move-target').value = 'MEXICO';
-  document.querySelector('#move-quantity').value = '40';
-  document.querySelector('#move-form').requestSubmit();
+  document.querySelector('#attack-quantity').value = '40';
+  document.querySelector('#attack-form').requestSubmit();
 })()`);
 await delay(120);
+const attackCommitment = await evaluate(`({
+  dialogOpen: document.querySelector('#command-dialog').open,
+  commitments: document.querySelectorAll('.attack-commitments > div').length,
+  text: document.querySelector('.attack-commitments')?.textContent
+})`);
+if (!attackCommitment.dialogOpen || attackCommitment.commitments !== 1 || !attackCommitment.text.includes('United States')) throw new Error(`Multi-source attack commitment failed: ${JSON.stringify(attackCommitment)}.`);
+await evaluate("document.querySelector('.dialog-close').click()");
 const queued = await evaluate("document.querySelector('#queue-count').textContent");
 await evaluate("document.querySelector('#end-turn-button').click()");
 await delay(700);
@@ -217,16 +271,18 @@ const battleAnimation = await evaluate(`({
   visible: !document.querySelector('#battle-sequence').hidden,
   title: document.querySelector('#battle-title').textContent,
   factions: document.querySelectorAll('.battle-faction').length,
-  route: document.querySelector('#battle-route').textContent
+  route: document.querySelector('#battle-route').textContent,
+  transparentOverlay: getComputedStyle(document.querySelector('#battle-sequence')).backgroundColor === 'rgba(0, 0, 0, 0)',
+  hudBackground: getComputedStyle(document.querySelector('.battle-hud')).backgroundImage
 })`);
-if (!battleAnimation.visible || battleAnimation.factions < 2 || !battleAnimation.route.includes('Mexico')) {
+if (!battleAnimation.visible || battleAnimation.factions < 2 || !battleAnimation.route.includes('Mexico') || !battleAnimation.transparentOverlay || !battleAnimation.hudBackground.includes('rgba')) {
   const battleDebug = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, dialog: document.querySelector('#dialog-title').textContent, toast: document.querySelector('#toast').textContent })`);
   throw new Error(`Combat presentation did not start: ${JSON.stringify({ battleAnimation, battleDebug, queued, runtimeErrors })}.`);
 }
 await screenshot("battle-animation.png");
 for (let attempt = 0; attempt < 45; attempt += 1) {
   if (await evaluate("document.querySelectorAll('.battle-faction.fallen').length > 0")) break;
-  await delay(100);
+  await delay(40);
 }
 const battleResult = await evaluate(`({
   visible: !document.querySelector('#battle-sequence').hidden,
@@ -243,7 +299,7 @@ for (let attempt = 0; attempt < 40; attempt += 1) {
   await delay(100);
 }
 await screenshot("game-after-turn.png");
-const afterTurn = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, cash: document.querySelector('#status-cash').textContent })`);
+const afterTurn = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, cash: document.querySelector('#status-cash').textContent, resourceLog: [...document.querySelectorAll('.log-item strong')].some((item) => item.textContent.includes('Country resources delivered')) })`);
 
 await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
 await evaluate("window.dispatchEvent(new Event('resize'))");
@@ -280,7 +336,16 @@ for (const button of mobile.countryActions) {
   }
 }
 
-await evaluate("document.querySelector('#settings-button').click()");
+await evaluate("document.querySelector('#objective-button').click()");
+await delay(120);
+const mobileForces = await evaluate(`(() => {
+  const dialog = document.querySelector('#command-dialog').getBoundingClientRect();
+  const first = document.querySelector('.force-country').getBoundingClientRect();
+  return { cards: document.querySelectorAll('.force-country').length, dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom }, firstWidth: first.width, resourceLog: [...document.querySelectorAll('.log-item strong')].some((item) => item.textContent.includes('Country resources delivered')) };
+})()`);
+if (mobileForces.cards < 3 || mobileForces.dialog.left < 0 || mobileForces.dialog.right > mobile.viewport[0] || mobileForces.firstWidth > mobile.viewport[0] || !mobileForces.resourceLog) throw new Error(`Mobile force overview or resource report is not reachable: ${JSON.stringify(mobileForces)}.`);
+await screenshot("forces-mobile.png");
+await evaluate("document.querySelector('[data-force-country=\"UNITED_STATES\"]').click(); document.querySelector('#settings-button').click()");
 await delay(120);
 const settingsDialog = await evaluate(`({ title: document.querySelector('#dialog-title').textContent, toggles: document.querySelectorAll('.setting-row input').length })`);
 if (settingsDialog.title !== "Settings" || settingsDialog.toggles !== 2) throw new Error(`Settings dialog failed: ${JSON.stringify(settingsDialog)}.`);
@@ -303,7 +368,7 @@ if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[
 }
 await screenshot("dialog-mobile.png");
 
-console.log(JSON.stringify({ setup, start, mapSelection, transportDialog, dialog, rejectedOrder, persistentUpgrade, queued, battleAnimation, battleResult, afterTurn, mobile, settingsDialog, exitDialog, mobileDialog, runtimeErrors }, null, 2));
+console.log(JSON.stringify({ setup, start, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, mobileForces, settingsDialog, exitDialog, mobileDialog, runtimeErrors }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   if (!edge.killed) edge.kill();

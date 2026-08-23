@@ -8,8 +8,10 @@ import {
   availableUpgrades,
   boardTroops,
   buyWorldUpgrade,
+  canBuyIn,
   cancelAction,
   chooseNavalDoctrine,
+  countryResourceBonus,
   endTurn,
   maxPurchasableUnits,
   navalTransportMultiplier,
@@ -17,6 +19,7 @@ import {
   queueBuy,
   queueMove,
   queueUpgrade,
+  unitCost,
   useSpyAction,
   useStrategicWeapon,
   validateSavedGame,
@@ -47,6 +50,39 @@ test("new campaigns preserve faction and starting-country data", () => {
   assert.equal(state.factions[USA].cash, 50);
 });
 
+test("country resources grant the recovered yearly units and Power Plant doubles only that grant", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 44 });
+  for (const [name, faction] of Object.entries(state.factions)) if (name !== USA) faction.defeated = true;
+  state.countries.SWEDEN.owner = USA;
+  const startingPlanes = state.countries.SWEDEN.units.planes;
+  endTurn(data, state);
+  assert.equal(state.countries.SWEDEN.units.planes, startingPlanes + 1);
+
+  state.countries.SWEDEN.upgrades.push(15);
+  endTurn(data, state);
+  assert.equal(state.countries.SWEDEN.units.planes, startingPlanes + 3);
+  assert.deepEqual(countryResourceBonus(data, state, "SWEDEN"), { cash: 0, units: { planes: 2 }, costDiscount: 0 });
+});
+
+test("Petroleum discounts recovered unit types and Power Plant doubles the discount", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 45 });
+  const faction = data.factions.find((item) => item.factionName === USA);
+  assert.equal(unitCost(data, state, USA, "ALASKA", "ships"), Math.round(faction.shipsCost * 0.75));
+  assert.equal(unitCost(data, state, USA, "ALASKA", "troops"), faction.troopsCost);
+  state.countries.ALASKA.upgrades.push(15);
+  assert.equal(unitCost(data, state, USA, "ALASKA", "ships"), Math.round(faction.shipsCost * 0.5));
+  assert.equal(countryResourceBonus(data, state, "ALASKA").costDiscount, 0.5);
+});
+
+test("resource synergy awards the recovered capital bonus after ten countries", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 46 });
+  for (const [name, faction] of Object.entries(state.factions)) if (name !== USA) faction.defeated = true;
+  for (const source of data.countries.filter((country) => country.countryResource === 3).slice(0, 10)) state.countries[source.name].owner = USA;
+  const capitalTroops = state.countries.UNITED_STATES.units.troops;
+  endTurn(data, state);
+  assert.equal(state.countries.UNITED_STATES.units.troops, capitalTroops + 10);
+});
+
 test("corrupted browser saves are rejected before they can enter the UI", () => {
   const state = newGame(data, { playerFaction: USA, seed: 43 });
   assert.equal(validateSavedGame(state, data), true);
@@ -70,6 +106,14 @@ test("queued purchases reserve cash and can be cancelled with a refund", () => {
   cancelAction(state, state.queue[0].id);
   assert.equal(state.queue.length, 0);
   assert.equal(state.factions[USA].cash, startingCash);
+});
+
+test("newly conquered countries require a Supply Center before buying units", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 47 });
+  state.countries.MEXICO.owner = USA;
+  assert.equal(canBuyIn(data, state, USA, "MEXICO"), false);
+  state.countries.MEXICO.upgrades.push(1);
+  assert.equal(canBuyIn(data, state, USA, "MEXICO"), true);
 });
 
 test("purchase and move quantities must be positive whole numbers", () => {

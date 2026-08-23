@@ -159,26 +159,35 @@ export function availableUpgrades(data, state, factionName, scope, countryName =
   });
 }
 
-function costMultiplier(country, unitType) {
-  const resource = country.countryResource;
-  if (resource === 0 && ["ships", "planes", "missiles"].includes(unitType)) return 0.85;
-  if (resource === 1 && ["ships", "planes"].includes(unitType)) return 0.8;
-  if (resource === 2) return 0.9;
-  if (resource === 3 && unitType === "troops") return 0.75;
-  if (resource === 4 && ["missiles", "commandos"].includes(unitType)) return 0.85;
-  if (resource === 5 && unitType === "ships") return 0.75;
-  return 1;
+function costMultiplier(source, country, unitType) {
+  if (source.countryResource !== 0 || !["ships", "planes", "missiles"].includes(unitType)) return 1;
+  return country.upgrades.includes(15) ? 0.5 : 0.75;
+}
+
+export function countryResourceBonus(data, state, countryName) {
+  const source = countrySource(data, countryName);
+  const country = countryState(state, countryName);
+  if (!source) throw new GameRuleError("Unknown country.");
+  const multiplier = country.upgrades.includes(15) ? 2 : 1;
+  if (source.countryResource === 0) return { cash: 0, units: {}, costDiscount: multiplier === 2 ? 0.5 : 0.25 };
+  if (source.countryResource === 1) return { cash: 0, units: { planes: multiplier }, costDiscount: 0 };
+  if (source.countryResource === 2) return { cash: 30 * multiplier, units: {}, costDiscount: 0 };
+  if (source.countryResource === 3) return { cash: 0, units: { troops: multiplier }, costDiscount: 0 };
+  if (source.countryResource === 4) return { cash: 0, units: { missiles: multiplier }, costDiscount: 0 };
+  if (source.countryResource === 5) return { cash: 0, units: { ships: multiplier }, costDiscount: 0 };
+  return { cash: 0, units: {}, costDiscount: 0 };
 }
 
 export function unitCost(data, state, factionName, countryName, unitType) {
   const faction = factionSource(data, factionName);
   const country = countrySource(data, countryName);
+  const current = countryState(state, countryName);
   const unit = UNIT_TYPES[unitType];
   if (!faction || !country || !unit) throw new GameRuleError("Unknown unit purchase.");
-  return Math.max(1, Math.round(faction[unit.costKey] * costMultiplier(country, unitType)));
+  return Math.max(1, Math.round(faction[unit.costKey] * costMultiplier(country, current, unitType)));
 }
 
-function canBuyIn(data, state, factionName, countryName) {
+export function canBuyIn(data, state, factionName, countryName) {
   const source = countrySource(data, countryName);
   const country = countryState(state, countryName);
   return country.owner === factionName && country.nukedUntil <= state.year
@@ -536,8 +545,53 @@ function incomeFor(data, state, countryName) {
   let income = source.cashPerTurn || 0;
   if (country.upgrades.includes(6)) income *= 1.5;
   if (country.upgrades.includes(8)) income *= 1.25;
-  if (country.upgrades.includes(15)) income *= 2;
   return Math.round(income);
+}
+
+const SYNERGY_BONUSES = {
+  0: { units: { ships: 5, planes: 5, missiles: 5 } },
+  1: { units: { planes: 10 } },
+  2: { cash: 200 },
+  3: { units: { troops: 10 } },
+  4: { units: { missiles: 10 } },
+  5: { units: { ships: 10 } },
+};
+
+function applyAward(state, factionName, countryName, award, totals) {
+  if (award.cash) {
+    state.factions[factionName].cash += award.cash;
+    totals.cash += award.cash;
+  }
+  for (const [unitType, quantity] of Object.entries(award.units || {})) {
+    state.countries[countryName].units[unitType] += quantity;
+    totals.units[unitType] += quantity;
+  }
+}
+
+function applyCountryResourceBonuses(data, state) {
+  const totals = Object.fromEntries(Object.keys(state.factions).map((name) => [name, { cash: 0, units: emptyUnits() }]));
+  for (const source of data.countries) {
+    const factionName = state.countries[source.name].owner;
+    if (!factionName || state.factions[factionName].defeated) continue;
+    applyAward(state, factionName, source.name, countryResourceBonus(data, state, source.name), totals[factionName]);
+  }
+  for (const sourceFaction of data.factions) {
+    const factionName = sourceFaction.factionName;
+    const capitalName = sourceFaction.capitalCountry;
+    if (state.factions[factionName].defeated || state.countries[capitalName]?.owner !== factionName) continue;
+    const resourceCounts = new Map();
+    for (const source of data.countries) if (state.countries[source.name].owner === factionName) {
+      resourceCounts.set(source.countryResource, (resourceCounts.get(source.countryResource) || 0) + 1);
+    }
+    for (const [resource, count] of resourceCounts) if (count > 9) {
+      applyAward(state, factionName, capitalName, SYNERGY_BONUSES[resource], totals[factionName]);
+    }
+  }
+  const playerTotals = totals[state.playerFaction];
+  const parts = Object.entries(playerTotals.units).filter(([, quantity]) => quantity > 0)
+    .map(([unitType, quantity]) => `${quantity} ${quantity === 1 ? UNIT_TYPES[unitType].singular : UNIT_TYPES[unitType].label.toLowerCase()}`);
+  if (playerTotals.cash) parts.push(`$${playerTotals.cash}`);
+  if (parts.length) record(state, `Country resources delivered ${parts.join(", ")}.`, "good");
 }
 
 function advanceEconomy(data, state) {
@@ -584,6 +638,7 @@ export function endTurn(data, state, battleEvents = []) {
   for (const factionName of Object.keys(state.factions)) if (factionName !== state.playerFaction) aiPlan(data, state, factionName);
   resolveQueue(data, state, battleEvents);
   updateDefeatedFactions(state);
+  applyCountryResourceBonuses(data, state);
   advanceEconomy(data, state);
   state.year += 1;
   state.turn += 1;
