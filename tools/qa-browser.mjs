@@ -148,6 +148,25 @@ const selectedUnitedStates = await evaluate("document.querySelector('.country-na
 if (selectedUnitedStates !== "United States") throw new Error(`Corrected U.S. hit region selected ${selectedUnitedStates} at ${JSON.stringify(mapTargets.unitedStates)}.`);
 const mapSelection = { selectedRussia, selectedUnitedStates };
 
+await evaluate(`(() => {
+  document.querySelector('#move-action').click();
+  const unit = document.querySelector('#move-unit');
+  unit.value = 'ships';
+  unit.dispatchEvent(new Event('change', { bubbles: true }));
+  document.querySelector('#move-target').value = 'ALASKA';
+  document.querySelector('#move-quantity').value = '2';
+  document.querySelector('#move-form').requestSubmit();
+})()`);
+await delay(120);
+const transportDialog = await evaluate(`({
+  title: document.querySelector('#dialog-title').textContent,
+  capacity: document.querySelector('#board-quantity')?.max,
+  route: document.querySelector('#board-route')?.selectedOptions[0]?.textContent
+})`);
+if (transportDialog.title !== "Board Troops" || transportDialog.capacity !== "2") throw new Error(`Naval boarding flow failed: ${JSON.stringify(transportDialog)}.`);
+await evaluate("document.querySelector('#board-quantity').value='2'; document.querySelector('#board-form').requestSubmit()");
+await delay(120);
+
 await evaluate("document.querySelector('#buy-action').click()");
 await delay(120);
 const dialog = await evaluate(`({
@@ -165,12 +184,64 @@ const rejectedOrder = await evaluate(`({
   queue: document.querySelector('#queue-count').textContent,
   error: document.querySelector('#toast').textContent
 })`);
-if (!rejectedOrder.dialogOpen || rejectedOrder.queue !== "0") throw new Error(`Rejected order changed state or closed its dialog: ${JSON.stringify(rejectedOrder)}.`);
+if (!rejectedOrder.dialogOpen || rejectedOrder.queue !== "1") throw new Error(`Rejected order changed state or closed its dialog: ${JSON.stringify(rejectedOrder)}.`);
 await evaluate("document.querySelector('#buy-quantity').value='1'; document.querySelector('#buy-form').requestSubmit()");
+await delay(120);
+
+await evaluate("document.querySelector('#country-upgrade-action').click()");
+await delay(120);
+await evaluate("document.querySelector('[data-mode=\"country\"][data-upgrade=\"6\"]')?.click()");
+await delay(120);
+const persistentUpgrade = await evaluate(`({
+  open: document.querySelector('#command-dialog').open,
+  title: document.querySelector('#dialog-title').textContent,
+  queuedLabel: document.querySelector('[data-mode="country"][data-upgrade="6"]')?.textContent
+})`);
+if (!persistentUpgrade.open || persistentUpgrade.queuedLabel !== "Queued ✓") throw new Error(`Upgrade dialog did not remain open with queued state: ${JSON.stringify(persistentUpgrade)}.`);
+await evaluate("document.querySelector('.dialog-close').click()");
+
+await evaluate(`(() => {
+  document.querySelector('#move-action').click();
+  const unit = document.querySelector('#move-unit');
+  unit.value = 'troops';
+  unit.dispatchEvent(new Event('change', { bubbles: true }));
+  document.querySelector('#move-target').value = 'MEXICO';
+  document.querySelector('#move-quantity').value = '40';
+  document.querySelector('#move-form').requestSubmit();
+})()`);
 await delay(120);
 const queued = await evaluate("document.querySelector('#queue-count').textContent");
 await evaluate("document.querySelector('#end-turn-button').click()");
-await delay(500);
+await delay(700);
+const battleAnimation = await evaluate(`({
+  visible: !document.querySelector('#battle-sequence').hidden,
+  title: document.querySelector('#battle-title').textContent,
+  factions: document.querySelectorAll('.battle-faction').length,
+  route: document.querySelector('#battle-route').textContent
+})`);
+if (!battleAnimation.visible || battleAnimation.factions < 2 || !battleAnimation.route.includes('Mexico')) {
+  const battleDebug = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, dialog: document.querySelector('#dialog-title').textContent, toast: document.querySelector('#toast').textContent })`);
+  throw new Error(`Combat presentation did not start: ${JSON.stringify({ battleAnimation, battleDebug, queued, runtimeErrors })}.`);
+}
+await screenshot("battle-animation.png");
+for (let attempt = 0; attempt < 45; attempt += 1) {
+  if (await evaluate("document.querySelectorAll('.battle-faction.fallen').length > 0")) break;
+  await delay(100);
+}
+const battleResult = await evaluate(`({
+  visible: !document.querySelector('#battle-sequence').hidden,
+  winner: document.querySelectorAll('.battle-faction.winner').length,
+  fallen: document.querySelectorAll('.battle-faction.fallen').length,
+  result: document.querySelector('#battle-result').textContent,
+  progress: document.querySelector('#battle-progress-fill').style.width
+})`);
+if (!battleResult.visible || battleResult.winner !== 1 || battleResult.fallen < 1 || battleResult.progress !== "100%") throw new Error(`Combat result presentation failed: ${JSON.stringify(battleResult)}.`);
+await screenshot("battle-result.png");
+await evaluate("document.querySelector('#skip-all-battles').click()");
+for (let attempt = 0; attempt < 40; attempt += 1) {
+  if (await evaluate("document.querySelector('#battle-sequence').hidden")) break;
+  await delay(100);
+}
 await screenshot("game-after-turn.png");
 const afterTurn = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, cash: document.querySelector('#status-cash').textContent })`);
 
@@ -209,6 +280,16 @@ for (const button of mobile.countryActions) {
   }
 }
 
+await evaluate("document.querySelector('#settings-button').click()");
+await delay(120);
+const settingsDialog = await evaluate(`({ title: document.querySelector('#dialog-title').textContent, toggles: document.querySelectorAll('.setting-row input').length })`);
+if (settingsDialog.title !== "Settings" || settingsDialog.toggles !== 2) throw new Error(`Settings dialog failed: ${JSON.stringify(settingsDialog)}.`);
+await evaluate("document.querySelector('.dialog-close').click(); document.querySelector('#exit-button').click()");
+await delay(120);
+const exitDialog = await evaluate(`({ title: document.querySelector('#dialog-title').textContent, actions: document.querySelectorAll('.exit-actions button').length })`);
+if (exitDialog.actions !== 3) throw new Error(`Exit confirmation failed: ${JSON.stringify(exitDialog)}.`);
+await evaluate("document.querySelector('#stay-game').click()");
+
 await evaluate("document.querySelector('#buy-action').click()");
 await delay(120);
 const mobileDialog = await evaluate(`(() => {
@@ -222,7 +303,7 @@ if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[
 }
 await screenshot("dialog-mobile.png");
 
-console.log(JSON.stringify({ setup, start, mapSelection, dialog, rejectedOrder, queued, afterTurn, mobile, mobileDialog, runtimeErrors }, null, 2));
+console.log(JSON.stringify({ setup, start, mapSelection, transportDialog, dialog, rejectedOrder, persistentUpgrade, queued, battleAnimation, battleResult, afterTurn, mobile, settingsDialog, exitDialog, mobileDialog, runtimeErrors }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   if (!edge.killed) edge.kill();

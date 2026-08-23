@@ -35,3 +35,18 @@ test("all shipped PNGs use the standard PNG signature, not Apple's CgBI chunk", 
     assert.notEqual(bytes.subarray(12, 16).toString("ascii"), "CgBI", name);
   }
 });
+
+test("preserved combat sounds are browser-native PCM wave files", () => {
+  const audioRoot = path.join(root, "assets", "audio");
+  const expected = ["marchSound.wav", "attack1Sound.wav", "attack2Sound.wav", "attack3Sound.wav", "attack4Sound.wav", "attackFailed.wav"];
+  assert.deepEqual(fs.readdirSync(audioRoot).sort(), expected.sort());
+  for (const name of expected) {
+    const bytes = fs.readFileSync(path.join(audioRoot, name));
+    assert.equal(bytes.toString("ascii", 0, 4), "RIFF", name);
+    assert.equal(bytes.toString("ascii", 8, 12), "WAVE", name);
+    assert.equal(bytes.readUInt16LE(20), 1, `${name} must use PCM`);
+    assert.equal(bytes.readUInt16LE(22), 1, `${name} must be mono`);
+    assert.equal(bytes.readUInt32LE(24), 44100, `${name} sample rate`);
+    assert.ok(bytes.length > 100000, `${name} should contain decoded audio`);
+  }
+});

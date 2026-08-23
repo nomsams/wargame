@@ -1,14 +1,18 @@
 import {
   GameRuleError,
   availableUnitCount,
+  availableBoardingCapacity,
   availableUpgrades,
+  boardTroops,
   buyWorldUpgrade,
   canReach,
   cancelAction,
   checkVictory,
+  chooseNavalDoctrine,
   displayCountry,
   endTurn,
   maxPurchasableUnits,
+  navalTransportMultiplier,
   newGame,
   publicCountryView,
   queueBuy,
@@ -20,9 +24,10 @@ import {
   validateSavedGame,
 } from "./engine.js";
 import { FACTION_META, OBJECTIVES, RESOURCE_IMAGES, RESOURCE_NAMES, SPY_ACTIONS, UNIT_TYPES, upgradeById } from "./config.js";
-import { decodeHitColor, encodeHitColor, projectMapPoint } from "./projection.js";
+import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, projectMapPoint } from "./projection.js";
 
 const SAVE_KEY = "wargame-preservation-save-v1";
+const PREFERENCES_KEY = "wargame-preservation-preferences-v1";
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const asset = (name) => `./assets/${name}`;
@@ -33,6 +38,12 @@ let gameState = null;
 let selectedCountry = null;
 let selectedFaction = null;
 let toastTimer;
+let sessionSaveBaseline = null;
+let battleColorOverride = null;
+let battleSkipCurrent = false;
+let battleSkipAll = false;
+let currentBattleAudio = null;
+let preferences = readPreferences();
 
 const canvas = $("#world-map");
 const context = canvas.getContext("2d", { alpha: false });
@@ -40,6 +51,14 @@ const hitCanvas = document.createElement("canvas");
 const hitContext = hitCanvas.getContext("2d", { willReadFrequently: true });
 const mapView = { zoom: 1, panX: 0, panY: 0, dragging: false, moved: 0, lastX: 0, lastY: 0 };
 const countryEdges = [];
+const audioSources = {
+  march: "./assets/audio/marchSound.wav",
+  attack1: "./assets/audio/attack1Sound.wav",
+  attack2: "./assets/audio/attack2Sound.wav",
+  attack3: "./assets/audio/attack3Sound.wav",
+  attack4: "./assets/audio/attack4Sound.wav",
+  failed: "./assets/audio/attackFailed.wav",
+};
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
@@ -51,6 +70,37 @@ function localized(key, fallback = key) {
 
 function countryLabel(name) {
   return localized(name, displayCountry(name));
+}
+
+function readPreferences() {
+  try {
+    return { soundFx: true, combatAnimations: true, ...JSON.parse(localStorage.getItem(PREFERENCES_KEY) || "{}") };
+  } catch {
+    return { soundFx: true, combatAnimations: true };
+  }
+}
+
+function savePreferences() {
+  localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
+  document.documentElement.classList.toggle("combat-motion-off", !preferences.combatAnimations);
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function stopBattleAudio() {
+  if (!currentBattleAudio) return;
+  currentBattleAudio.pause();
+  currentBattleAudio.currentTime = 0;
+  currentBattleAudio = null;
+}
+
+function playBattleSound(name, volume = 0.72) {
+  stopBattleAudio();
+  if (!preferences.soundFx || !audioSources[name]) return;
+  const audio = new Audio(audioSources[name]);
+  audio.volume = volume;
+  currentBattleAudio = audio;
+  audio.play().catch(() => {});
 }
 
 function showScreen(id) {
@@ -128,6 +178,7 @@ function buildSetup() {
 }
 
 function startCampaign() {
+  sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
   gameState = newGame(gameData, {
     playerFaction: selectedFaction,
     heroName: $("#hero-name").value.trim() || "General",
@@ -188,6 +239,7 @@ function countryColor(name, index) {
     return `rgb(${vertex[2]} ${vertex[3]} ${vertex[4]})`;
   }
   if (country.nukedUntil > gameState.year) return "#050505";
+  if (battleColorOverride?.country === name) return battleColorOverride.owner ? FACTION_META[battleColorOverride.owner].color : "#161d27";
   return country.owner ? FACTION_META[country.owner].color : "#161d27";
 }
 
@@ -246,7 +298,8 @@ function drawMap() {
     for (const faction of gameData.factions) {
       const capital = gameData.map.countries.find((country) => country.name === faction.capitalCountry);
       if (!capital) continue;
-      const center = pointOnMap(capital.center, width, height);
+      const marker = CAPITAL_MARKER_OVERRIDES[capital.name] || capital.center;
+      const center = pointOnMap(marker, width, height);
       context.fillStyle = "#ffe27d";
       context.fillText("★", center[0], center[1]);
     }
@@ -291,12 +344,14 @@ function renderCountryPanel() {
   const upgradePills = view.upgrades?.length ? view.upgrades.map((id) => `<span>${escapeHtml(upgradeById(id)?.short || upgradeById(id)?.title || `Upgrade ${id}`)}</span>`).join("") : `<span>None built</span>`;
   const own = country.owner === gameState.playerFaction;
   const hostile = country.owner && !own;
+  const boardableShips = own ? gameState.queue.filter((action) => action.type === "move" && action.unitType === "ships"
+    && action.faction === gameState.playerFaction && action.from === selectedCountry && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0) : [];
   panel.style.setProperty("--owner", ownerMeta.color);
   panel.style.setProperty("--accent", ownerMeta.accent);
   panel.innerHTML = `
     <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt="">${escapeHtml(resource)} · $${source.cashPerTurn}/year</div></div>
     <div class="country-actions">
-      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action">Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>` : ""}
+      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action">Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}` : ""}
       ${hostile ? `<button id="spy-country-action">Spy</button><button id="attack-help-action" class="attack">How to attack</button>` : ""}
     </div>
     <section class="panel-section"><h3>Garrison</h3>${unitsMarkup(view)}</section>
@@ -307,6 +362,7 @@ function renderCountryPanel() {
   $("#buy-action")?.addEventListener("click", () => openBuyDialog(selectedCountry));
   $("#country-upgrade-action")?.addEventListener("click", () => openCountryUpgrades(selectedCountry));
   $("#country-info-action")?.addEventListener("click", () => openCountryInfo(selectedCountry));
+  $("#board-action")?.addEventListener("click", () => openBoardTroopsDialog(boardableShips));
   $("#spy-country-action")?.addEventListener("click", () => openSpyDialog(selectedCountry));
   $("#attack-help-action")?.addEventListener("click", () => notify("Select one of your countries, choose Move / Attack, then target this country."));
 }
@@ -398,27 +454,79 @@ function openMoveDialog(fromName) {
     $("#move-unit", root).addEventListener("change", updateTargets); updateTargets();
     $("#move-form", root).addEventListener("submit", (event) => {
       event.preventDefault();
-      if (withRules(() => queueMove(gameData, gameState, gameState.playerFaction, fromName, $("#move-target", root).value, $("#move-unit", root).value, $("#move-quantity", root).value))) closeDialog();
+      let queuedAction;
+      const unitType = $("#move-unit", root).value;
+      if (withRules(() => { queuedAction = queueMove(gameData, gameState, gameState.playerFaction, fromName, $("#move-target", root).value, unitType, $("#move-quantity", root).value); })) {
+        if (unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, queuedAction.id) > 0) openBoardTroopsDialog([queuedAction]);
+        else closeDialog();
+      }
     });
   });
 }
 
-function upgradeCard(upgrade, mode, countryName = null) {
+function openBoardTroopsDialog(actions) {
+  const routes = actions.filter((action) => availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0);
+  if (!routes.length) return notify("No queued ships have free troop capacity.", "bad");
+  const multiplier = navalTransportMultiplier(gameState, gameState.playerFaction);
+  const options = routes.map((action) => `<option value="${action.id}">${escapeHtml(countryLabel(action.from))} → ${escapeHtml(countryLabel(action.to))} · ${action.quantity} ships</option>`).join("");
+  openDialog("Naval transport", "Board Troops", `<form id="board-form" class="dialog-form"><div class="intel-panel">Each ship carries ${multiplier} troop${multiplier === 1 ? "" : "s"}${multiplier === 2 ? " with Sea Carrier" : ""}. The troops land with the fleet if it wins.</div><label>Queued fleet<select id="board-route">${options}</select></label><label>Troops to board<input id="board-quantity" type="number" inputmode="numeric" min="1" step="1" value="1"></label><p id="board-help" class="order-summary"></p><div class="dialog-actions"><button class="primary-button" type="submit">Board troops</button><button id="board-later" class="secondary-button" type="button">Not now</button></div></form>`, (root) => {
+    const update = () => {
+      const actionId = $("#board-route", root).value;
+      const capacity = availableBoardingCapacity(gameState, gameState.playerFaction, actionId);
+      const input = $("#board-quantity", root);
+      input.max = capacity;
+      if (Number(input.value) > capacity) input.value = capacity;
+      $("#board-help", root).textContent = `${capacity} troop space${capacity === 1 ? "" : "s"} available on this fleet.`;
+    };
+    $("#board-route", root).addEventListener("change", update);
+    $("#board-later", root).addEventListener("click", closeDialog);
+    $("#board-form", root).addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (withRules(() => boardTroops(gameState, gameState.playerFaction, $("#board-route", root).value, $("#board-quantity", root).value))) closeDialog();
+    });
+    update();
+  });
+}
+
+function upgradeCard(upgrade, mode, countryName = null, status = "available") {
   const description = localized(`${upgrade.title} Description`, "Recovered strategic upgrade.");
-  return `<article class="action-card"><img src="${asset(upgrade.image)}" alt=""><div><h3>${escapeHtml(upgrade.short || upgrade.title)} <span class="price">$${upgrade.cost.toLocaleString()}</span></h3><p>${escapeHtml(description)}</p><button type="button" data-upgrade="${upgrade.id}" data-mode="${mode}" ${gameState.factions[gameState.playerFaction].cash < upgrade.cost ? "disabled" : ""}>Build${countryName ? ` in ${escapeHtml(countryLabel(countryName))}` : ""}</button></div></article>`;
+  const complete = status !== "available";
+  const label = status === "queued" ? "Queued ✓" : status === "built" ? "Built ✓" : `Build${countryName ? ` in ${escapeHtml(countryLabel(countryName))}` : ""}`;
+  return `<article class="action-card ${complete ? "action-complete" : ""}"><img src="${asset(upgrade.image)}" alt=""><div><h3>${escapeHtml(upgrade.short || upgrade.title)} <span class="price">$${upgrade.cost.toLocaleString()}</span></h3><p>${escapeHtml(description)}</p><button type="button" data-upgrade="${upgrade.id}" data-mode="${mode}" ${complete || gameState.factions[gameState.playerFaction].cash < upgrade.cost ? "disabled" : ""}>${label}</button></div></article>`;
 }
 
 function openCountryUpgrades(countryName) {
-  const upgrades = availableUpgrades(gameData, gameState, gameState.playerFaction, "country", countryName);
-  openDialog(countryLabel(countryName), "Country Upgrades", upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "country", countryName)).join("")}</div>` : `<p>Every available upgrade has already been built here.</p>`, (root) => {
-    $$('[data-mode="country"]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => queueUpgrade(gameData, gameState, gameState.playerFaction, countryName, Number(button.dataset.upgrade)))) closeDialog(); }));
+  const queuedIds = gameState.queue.filter((action) => action.type === "country-upgrade" && action.faction === gameState.playerFaction && action.country === countryName).map((action) => action.upgradeId);
+  const upgrades = [...new Map([...availableUpgrades(gameData, gameState, gameState.playerFaction, "country", countryName), ...queuedIds.map(upgradeById)].filter(Boolean).map((upgrade) => [upgrade.id, upgrade])).values()];
+  openDialog(countryLabel(countryName), "Country Upgrades", `<div id="country-upgrade-list"></div>`, (root) => {
+    const render = () => {
+      const queued = new Set(gameState.queue.filter((action) => action.type === "country-upgrade" && action.faction === gameState.playerFaction && action.country === countryName).map((action) => action.upgradeId));
+      $("#country-upgrade-list", root).innerHTML = upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "country", countryName, queued.has(upgrade.id) ? "queued" : "available")).join("")}</div>` : `<p>Every available upgrade has already been built here.</p>`;
+      $$('[data-mode="country"]', root).forEach((button) => button.addEventListener("click", () => {
+        if (withRules(() => queueUpgrade(gameData, gameState, gameState.playerFaction, countryName, Number(button.dataset.upgrade)))) render();
+      }));
+    };
+    render();
   });
 }
 
 function openWorldUpgrades() {
   const upgrades = availableUpgrades(gameData, gameState, gameState.playerFaction, "world");
-  openDialog("Faction research", "World Upgrades", upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "world")).join("")}</div>` : `<p>All faction world upgrades have been completed.</p>`, (root) => {
-    $$('[data-mode="world"]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => buyWorldUpgrade(gameData, gameState, gameState.playerFaction, Number(button.dataset.upgrade)))) closeDialog(); }));
+  openDialog("Faction research", "Faction Upgrades", `<div id="world-upgrade-list"></div>`, (root) => {
+    const render = () => {
+      const faction = gameState.factions[gameState.playerFaction];
+      const naval = faction.unitUpgrades?.find((item) => ["sea-carrier", "advanced-battleship"].includes(item));
+      const worldMarkup = upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "world", null, faction.worldUpgrades.includes(upgrade.id) ? "built" : "available")).join("")}</div>` : `<p>All faction world upgrades have been completed.</p>`;
+      const doctrineCard = (id, title, image, description) => `<article class="action-card ${naval === id ? "action-complete" : ""}"><img src="${asset(image)}" alt=""><div><h3>${title}</h3><p>${description}</p><button type="button" data-doctrine="${id}" ${naval ? "disabled" : ""}>${naval === id ? "Selected ✓" : naval ? "Alternative locked" : "Select doctrine"}</button></div></article>`;
+      $("#world-upgrade-list", root).innerHTML = `<h3 class="dialog-section-title">World research</h3>${worldMarkup}<h3 class="dialog-section-title">Naval unit upgrade</h3><p class="section-help">Choose one permanent ship specialization.</p><div class="dialog-grid">${doctrineCard("sea-carrier", "Sea Carrier", "SeaCarrierImage.png", "Each ship can carry two troops instead of one.")}${doctrineCard("advanced-battleship", "Advanced Battleship", "AdvancedBattleshipImage.png", "Ships gain 50% attack and defence strength.")}</div>`;
+      $$('[data-mode="world"]', root).forEach((button) => button.addEventListener("click", () => {
+        if (withRules(() => buyWorldUpgrade(gameData, gameState, gameState.playerFaction, Number(button.dataset.upgrade)))) render();
+      }));
+      $$('[data-doctrine]', root).forEach((button) => button.addEventListener("click", () => {
+        if (withRules(() => chooseNavalDoctrine(gameState, gameState.playerFaction, button.dataset.doctrine))) render();
+      }));
+    };
+    render();
   });
 }
 
@@ -446,15 +554,19 @@ function openSpyDialog(defaultTarget = null) {
 
 function actionDescription(action) {
   if (action.type === "buy") return `Buy ${action.quantity} ${UNIT_TYPES[action.unitType].label.toLowerCase()} in ${countryLabel(action.country)}`;
-  if (action.type === "move") return `${action.quantity} ${UNIT_TYPES[action.unitType].label.toLowerCase()}: ${countryLabel(action.from)} → ${countryLabel(action.to)}`;
+  if (action.type === "move") return `${action.quantity} ${UNIT_TYPES[action.unitType].label.toLowerCase()}${action.carriedTroops ? ` carrying ${action.carriedTroops} troops` : ""}: ${countryLabel(action.from)} → ${countryLabel(action.to)}`;
   if (action.type === "country-upgrade") return `Build ${upgradeById(action.upgradeId)?.title} in ${countryLabel(action.country)}`;
   return action.type;
 }
 
 function openQueue() {
   const actions = gameState.queue.filter((action) => action.faction === gameState.playerFaction);
-  openDialog("Pending orders", "Action Queue", actions.length ? `<div class="queue-list">${actions.map((action) => `<div class="queue-item"><div><strong>${escapeHtml(actionDescription(action))}</strong><span>${action.cost ? ` · $${action.cost} reserved` : ""}</span></div><button type="button" data-cancel="${action.id}">Cancel</button></div>`).join("")}</div>` : `<p>No orders are queued. Spy actions are processed immediately.</p>`, (root) => {
+  openDialog("Pending orders", "Action Queue", actions.length ? `<div class="queue-list">${actions.map((action) => `<div class="queue-item"><div><strong>${escapeHtml(actionDescription(action))}</strong><span>${action.cost ? ` · $${action.cost} reserved` : action.unitType === "ships" ? ` · ${availableBoardingCapacity(gameState, gameState.playerFaction, action.id)} troop spaces free` : ""}</span></div><div class="queue-buttons">${action.unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0 ? `<button type="button" data-board="${action.id}">Board</button>` : ""}<button type="button" data-cancel="${action.id}">Cancel</button></div></div>`).join("")}</div>` : `<p>No orders are queued. Spy actions are processed immediately.</p>`, (root) => {
     $$('[data-cancel]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => cancelAction(gameState, button.dataset.cancel))) { closeDialog(); openQueue(); } }));
+    $$('[data-board]', root).forEach((button) => button.addEventListener("click", () => {
+      const action = gameState.queue.find((item) => item.id === button.dataset.board);
+      if (action) openBoardTroopsDialog([action]);
+    }));
   });
 }
 
@@ -465,13 +577,164 @@ function openObjective() {
   openDialog(faction.general.name, OBJECTIVES[gameState.objective].title, `<p>${escapeHtml(OBJECTIVES[gameState.objective].description)}</p><div class="intel-panel">Rank ${faction.general.level} · ${faction.conquests} conquests · ${owned} countries · $${faction.cash.toLocaleString()}</div><h3>Campaign log</h3><div class="log-list">${log}</div>`);
 }
 
+function openSettings() {
+  openDialog("Game options", "Settings", `<form class="settings-form"><label class="setting-row"><span><strong>Sound effects</strong><small>Original marching and battle sounds.</small></span><input id="sound-setting" type="checkbox" ${preferences.soundFx ? "checked" : ""}></label><label class="setting-row"><span><strong>Combat animations</strong><small>Zoom to every battle involving your faction.</small></span><input id="animation-setting" type="checkbox" ${preferences.combatAnimations ? "checked" : ""}></label><p class="section-help">During a battle, tap Show result to finish the current animation or Skip all to jump through the remaining reports.</p></form>`, (root) => {
+    $("#sound-setting", root).addEventListener("change", (event) => { preferences.soundFx = event.target.checked; savePreferences(); if (!preferences.soundFx) stopBattleAudio(); });
+    $("#animation-setting", root).addEventListener("change", (event) => { preferences.combatAnimations = event.target.checked; savePreferences(); });
+  });
+}
+
+function exitToMenu(saveCurrent) {
+  if (saveCurrent) {
+    autosave();
+    sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
+  } else if (sessionSaveBaseline === null) localStorage.removeItem(SAVE_KEY);
+  else localStorage.setItem(SAVE_KEY, sessionSaveBaseline);
+  closeDialog();
+  gameState = null;
+  selectedCountry = null;
+  mapView.zoom = 1;
+  mapView.panX = mapView.panY = 0;
+  showScreen("menu-screen");
+}
+
+function openExitPrompt() {
+  openDialog("Leave campaign", "Return to Main Menu?", `<p>Save the current position before leaving the battlefield?</p><div class="dialog-actions exit-actions"><button id="save-exit" class="primary-button" type="button">Save & Exit</button><button id="discard-exit" class="secondary-button danger-button" type="button">Exit Without Saving</button><button id="stay-game" class="secondary-button" type="button">Stay in Game</button></div>`, (root) => {
+    $("#save-exit", root).addEventListener("click", () => exitToMenu(true));
+    $("#discard-exit", root).addEventListener("click", () => exitToMenu(false));
+    $("#stay-game", root).addEventListener("click", closeDialog);
+  });
+}
+
+function groupedPlayerBattles(events) {
+  const groups = new Map();
+  for (const event of events) {
+    if (!groups.has(event.country)) groups.set(event.country, { country: event.country, events: [], participants: [] });
+    const group = groups.get(event.country);
+    group.events.push(event);
+    for (const faction of [event.defender, event.attacker]) {
+      const key = faction || "__neutral__";
+      if (!group.participants.some((item) => item.key === key)) group.participants.push({ key, faction });
+    }
+  }
+  return [...groups.values()].filter((group) => group.events.some((event) => event.attacker === gameState.playerFaction || event.defender === gameState.playerFaction));
+}
+
+function battleParticipantMarkup(participant) {
+  const meta = participant.faction ? FACTION_META[participant.faction] : { short: "Neutral", flag: "neutralFlag.png", color: "#67717b" };
+  return `<article class="battle-faction" data-faction="${escapeHtml(participant.key)}" style="--faction-color:${meta.color}"><img src="${asset(meta.flag)}" alt=""><strong>${escapeHtml(meta.short)}</strong><span>In position</span></article>`;
+}
+
+async function waitBattle(milliseconds) {
+  const started = performance.now();
+  while (!battleSkipCurrent && !battleSkipAll && performance.now() - started < milliseconds) await delay(40);
+}
+
+async function animateMapView(target, milliseconds) {
+  const start = { zoom: mapView.zoom, panX: mapView.panX, panY: mapView.panY };
+  if (!preferences.combatAnimations || battleSkipAll) Object.assign(mapView, target);
+  else {
+    const started = performance.now();
+    while (performance.now() - started < milliseconds && !battleSkipCurrent && !battleSkipAll) {
+      const progress = Math.min(1, (performance.now() - started) / milliseconds);
+      const eased = 1 - (1 - progress) ** 3;
+      mapView.zoom = start.zoom + (target.zoom - start.zoom) * eased;
+      mapView.panX = start.panX + (target.panX - start.panX) * eased;
+      mapView.panY = start.panY + (target.panY - start.panY) * eased;
+      drawMap();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    Object.assign(mapView, target);
+  }
+  drawMap();
+}
+
+function focusedMapView(countryName) {
+  const range = gameData.map.countries.find((country) => country.name === countryName);
+  const { width, height } = logicalSize();
+  const point = pointOnMap(range.center, width, height);
+  const zoom = width < 600 ? 2.35 : 2.8;
+  return { zoom, panX: (width / 2 - point[0]) * zoom, panY: (height / 2 - point[1]) * zoom };
+}
+
+function battleResultText(group, finalOwner) {
+  const player = gameState.playerFaction;
+  const playerAttacked = group.events.some((event) => event.attacker === player);
+  const playerDefended = group.events.some((event) => event.defender === player);
+  if (finalOwner === player && playerAttacked) return `${FACTION_META[player].short} conquered ${countryLabel(group.country)}.`;
+  if (finalOwner === player && playerDefended) return `${countryLabel(group.country)} held. The defence stands.`;
+  if (playerAttacked) return `The attack on ${countryLabel(group.country)} was defeated.`;
+  return `${countryLabel(group.country)} was lost to ${finalOwner ? FACTION_META[finalOwner].short : "neutral forces"}.`;
+}
+
+async function playBattleSequence(events) {
+  const groups = groupedPlayerBattles(events);
+  if (!groups.length || !preferences.combatAnimations) return;
+  const overlay = $("#battle-sequence");
+  const savedView = { zoom: mapView.zoom, panX: mapView.panX, panY: mapView.panY };
+  const savedCountry = selectedCountry;
+  battleSkipAll = false;
+  overlay.hidden = false;
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    battleSkipCurrent = false;
+    const first = group.events[0];
+    const finalOwner = gameState.countries[group.country].owner;
+    battleColorOverride = { country: group.country, owner: first.defender };
+    selectedCountry = group.country;
+    renderCountryPanel();
+    $("#battle-kicker").textContent = `Battle ${index + 1} of ${groups.length}`;
+    $("#battle-title").textContent = countryLabel(group.country);
+    $("#battle-route").textContent = group.events.map((event) => `${countryLabel(event.from)} → ${countryLabel(event.country)} · ${event.quantity} ${UNIT_TYPES[event.unitType].label.toLowerCase()}${event.carriedTroops ? ` + ${event.carriedTroops} troops aboard` : ""}`).join("  |  ");
+    $("#battle-factions").innerHTML = group.participants.map(battleParticipantMarkup).join("");
+    $("#battle-result").textContent = "Forces are marching into position…";
+    $("#battle-progress-fill").style.width = "8%";
+    playBattleSound("march", 0.78);
+    await animateMapView(focusedMapView(group.country), 760);
+    await waitBattle(720);
+    if (!battleSkipAll && !battleSkipCurrent) {
+      $("#battle-sequence").classList.add("battle-clash");
+      $("#battle-result").textContent = "Battle joined — attack and defence are resolving…";
+      $("#battle-progress-fill").style.width = "76%";
+      playBattleSound(`attack${index % 4 + 1}`, 0.64);
+      await waitBattle(1650);
+    }
+    stopBattleAudio();
+    const resultWasRequested = battleSkipCurrent;
+    battleSkipCurrent = false;
+    battleColorOverride = { country: group.country, owner: finalOwner };
+    drawMap();
+    const winnerKey = finalOwner || "__neutral__";
+    $$(".battle-faction", overlay).forEach((card) => {
+      const won = card.dataset.faction === winnerKey;
+      card.classList.toggle("winner", won);
+      card.classList.toggle("fallen", !won);
+      $("span", card).textContent = won ? "Holds the field" : "Defeated";
+    });
+    $("#battle-progress-fill").style.width = "100%";
+    $("#battle-result").textContent = battleResultText(group, finalOwner);
+    $("#battle-sequence").classList.remove("battle-clash");
+    const playerLost = group.events.some((event) => event.attacker === gameState.playerFaction) && finalOwner !== gameState.playerFaction;
+    if (playerLost) playBattleSound("failed", 0.72);
+    if (!battleSkipAll) await waitBattle(resultWasRequested ? 700 : 1050);
+    else await delay(100);
+  }
+  stopBattleAudio();
+  overlay.hidden = true;
+  battleColorOverride = null;
+  selectedCountry = savedCountry;
+  renderCountryPanel();
+  await animateMapView(savedView, battleSkipAll ? 0 : 520);
+  battleSkipCurrent = battleSkipAll = false;
+}
+
 function buildManual() {
   $("#manual-content").innerHTML = `
     <p>Wargame is a turn-based strategy game. Every order you plan is queued for the end of the year; espionage is immediate. Expand from your faction's three starting countries, build an economy, and meet your chosen objective.</p>
     <h3>1. Tactical map</h3><p>Colored countries belong to factions; dark countries are neutral. Select one of your countries to move forces, buy units, build infrastructure, or inspect it. Drag the map to pan and use the wheel or zoom controls.</p>
-    <h3>2. Moving and attacking</h3><p>Troops cross adjoining land borders. Ships travel between coastal countries. Planes, missiles, and commandos can reach distant targets. Moving into friendly territory transfers units; moving into hostile or neutral territory queues an attack.</p>
+    <h3>2. Moving, attacking, and naval transport</h3><p>Troops cross adjoining land borders. Ships travel between coastal countries. After queuing a ship movement, board troops onto that fleet from the country panel or Action Queue. Each ship carries one troop, or two after selecting Sea Carrier. Planes, missiles, and commandos can reach distant targets. Moving into friendly territory transfers units; moving into hostile or neutral territory queues an attack.</p>
     <h3>3. Economy and buying</h3><p>Every controlled country pays cash each year. Units may be bought in a faction's original countries or anywhere with a Supply Center. National resources reduce the cost of related units. Power Plants and faction infrastructure improve income.</p>
-    <h3>4. Combat</h3><p>Each faction has the original unit attack, defence, and cost profile recovered from the app. Generals, country defences, bribery, and world upgrades modify combat. Attacks include the small uncertainty present in battlefield operations.</p>
+    <h3>4. Combat</h3><p>Each faction has the original unit attack, defence, and cost profile recovered from the app. Generals, country defences, bribery, and upgrades modify combat. Battles involving your faction zoom to the contested country and replay with the preserved marching and combat sounds. Use Show result or Skip all to shorten the sequence.</p>
     <h3>5. Upgrades and spying</h3><p>Country upgrades include AWFDS, Supply Centers, Power Plants, and a faction-specific ability. World upgrades unlock decisive faction powers. Intelligence reveals a hidden garrison; Bribery halves its defence for the current year; 00 Agents unlock hits against rival generals.</p>
     <h3>6. End turn and saves</h3><p>End Turn lets all computer factions plan, then resolves purchases, construction, moves, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order and can also be saved from the toolbar.</p>`;
 }
@@ -488,7 +751,7 @@ function checkEnding() {
 
 function bindEvents() {
   $("#new-game-button").addEventListener("click", () => showScreen("setup-screen"));
-  $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { gameState = saved; selectedCountry = gameData.factions.find((faction) => faction.factionName === gameState.playerFaction)?.capitalCountry; showScreen("game-screen"); } });
+  $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { sessionSaveBaseline = localStorage.getItem(SAVE_KEY); gameState = saved; selectedCountry = gameData.factions.find((faction) => faction.factionName === gameState.playerFaction)?.capitalCountry; showScreen("game-screen"); } });
   $("#manual-button").addEventListener("click", () => showScreen("manual-screen"));
   $("#about-button").addEventListener("click", () => showScreen("about-screen"));
   $$('[data-screen]').forEach((button) => button.addEventListener("click", () => showScreen(button.dataset.screen)));
@@ -499,8 +762,16 @@ function bindEvents() {
   $("#world-upgrades-button").addEventListener("click", openWorldUpgrades);
   $("#espionage-button").addEventListener("click", () => openSpyDialog(selectedCountry));
   $("#objective-button").addEventListener("click", openObjective);
-  $("#save-button").addEventListener("click", () => { autosave(); notify("Campaign saved in this browser.", "good"); });
-  $("#end-turn-button").addEventListener("click", () => withRules(() => { endTurn(gameData, gameState); notify(`Orders resolved. Year ${gameState.year} begins.`, "good"); }));
+  $("#save-button").addEventListener("click", () => { autosave(); sessionSaveBaseline = localStorage.getItem(SAVE_KEY); notify("Campaign saved in this browser.", "good"); });
+  $("#settings-button").addEventListener("click", openSettings);
+  $("#exit-button").addEventListener("click", openExitPrompt);
+  $("#end-turn-button").addEventListener("click", async () => {
+    const battles = [];
+    if (withRules(() => { endTurn(gameData, gameState, battles); notify(`Orders resolved. Year ${gameState.year} begins.`, "good"); })) await playBattleSequence(battles);
+  });
+  $("#skip-battle").addEventListener("click", () => { battleSkipCurrent = true; stopBattleAudio(); });
+  $("#skip-all-battles").addEventListener("click", () => { battleSkipCurrent = battleSkipAll = true; stopBattleAudio(); });
+  $(".battle-backdrop").addEventListener("click", () => { battleSkipCurrent = true; stopBattleAudio(); });
   $("#ending-menu").addEventListener("click", () => { $("#ending").hidden = true; showScreen("menu-screen"); });
   $("#zoom-in").addEventListener("click", () => { mapView.zoom = Math.min(4, mapView.zoom * 1.25); drawMap(); });
   $("#zoom-out").addEventListener("click", () => { mapView.zoom = Math.max(1, mapView.zoom / 1.25); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); });
@@ -539,6 +810,7 @@ async function boot() {
     buildSetup();
     buildManual();
     bindEvents();
+    savePreferences();
     updateResumeButton();
     $("#loading").remove();
     $("#app").hidden = false;

@@ -1,3 +1,12 @@
+export const CAPITAL_MARKER_OVERRIDES = {
+  // The archived UK center sits near the English Channel and visually reads
+  // as continental Europe. Keep the marker on an interior southern-England
+  // triangle so it remains unambiguous at the game's rendered scale.
+  UNITED_KINGDOM: [5310.33, 2317.33],
+  RUSSIA: [6500, -8200],
+  JAPAN: [2153, -22133.33],
+};
+
 export function projectMapPoint(vertex, halfSize, width, height, padding = 18) {
   const [halfLatitude, halfLongitude] = halfSize;
   return [

@@ -93,10 +93,12 @@
 
       <nav class="command-bar" aria-label="Command toolbar">
         <button id="queue-button"><img src="./assets/actionQueueToolbarButton.png" alt=""><span>Queue</span><b id="queue-count">0</b></button>
-        <button id="world-upgrades-button"><img src="./assets/worldUpgradeToolbarButton.png" alt=""><span>World</span></button>
+        <button id="world-upgrades-button"><img src="./assets/worldUpgradeToolbarButton.png" alt=""><span>Upgrades</span></button>
         <button id="espionage-button"><img src="./assets/spyingToolbarButton.png" alt=""><span>Spying</span></button>
         <button id="objective-button"><img src="./assets/heroToolbarButton.png" alt=""><span>General</span></button>
         <button id="save-button"><img src="./assets/mainMenuToolbarButton.png" alt=""><span>Save</span></button>
+        <button id="settings-button"><img src="./assets/settingsButton.png" alt=""><span>Settings</span></button>
+        <button id="exit-button"><img src="./assets/mainMenuToolbarButton.png" alt=""><span>Menu</span></button>
         <button id="end-turn-button" class="end-turn"><span>End Turn</span><small>Resolve orders</small></button>
       </nav>
     </section>
@@ -125,6 +127,18 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <section id="battle-sequence" class="battle-sequence" hidden aria-live="polite" aria-labelledby="battle-title">
+    <div class="battle-backdrop"></div>
+    <div class="battle-hud">
+      <p id="battle-kicker" class="eyebrow">Battle report</p>
+      <h2 id="battle-title">Country under attack</h2>
+      <p id="battle-route" class="battle-route"></p>
+      <div id="battle-factions" class="battle-factions"></div>
+      <div class="battle-progress"><span id="battle-progress-fill"></span></div>
+      <p id="battle-result" class="battle-result">Forces are moving into position…</p>
+      <div class="battle-controls"><button id="skip-battle" type="button">Show result</button><button id="skip-all-battles" type="button">Skip all</button></div>
+    </div>
+  </section>
   <div id="ending" class="ending" hidden>
     <div><p class="eyebrow">Campaign complete</p><h2 id="ending-title"></h2><p id="ending-copy"></p><button id="ending-menu" class="primary-button">Return to main menu</button></div>
   </div>

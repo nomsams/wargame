@@ -22,7 +22,7 @@ The archived app was treated as untrusted input.
 3. The archive expanded to 605 entries and 11,455,027 bytes. No extracted scripts or binaries were launched.
 4. The ARM Mach-O executable was examined only with string extraction, structure parsing, symbol-table reading, and Capstone static disassembly.
 5. The browser app does not contain, load, emulate, or execute the Mach-O binary, NIB files, entitlements, torrent, SQLite metadata, or arbitrary archive content.
-6. Only decoded JSON and normalized PNG copies cross into `web/`. Browser paths are fixed; no path or HTML input is accepted from archive data at runtime.
+6. Only decoded JSON, normalized PNG copies, and six explicitly selected audio effects cross into `web/`. Browser paths are fixed; no path or HTML input is accepted from archive data at runtime.
 7. Campaigns remain in browser `localStorage`. The playable app makes no network requests after its static files are loaded.
 
 ## Recovered material
@@ -42,6 +42,8 @@ The original coordinate stream stores longitude west-positive. The browser proje
 
 Apple's optimized `CgBI` PNGs were decoded without altering the extracted originals. The converter unfilters raw scanlines, converts premultiplied BGRA pixels to straight RGBA, removes the private chunk, recompresses standard IDAT data, and writes valid CRCs. All 534 top-level images are retained as standard PNGs in `web/assets/`.
 
+The inert `marchSound`, four `attack` variants, and `attackFailed` CAF resources were individually selected from the IPA and decoded by `tools/convert-caf-ima4.mjs`. The converter accepts only the preserved mono 44.1 kHz Apple IMA4 packet layout and writes ordinary 16-bit PCM WAV files. No archived code or generic media parser is loaded by the website.
+
 The English and French binary localization plists are decoded in `preservation/recovered/`. The browser UI currently uses English text; the French database is retained for a future complete interface translation.
 
 ## Balance recovered from code
@@ -56,8 +58,9 @@ Some high-level behavior could not be recovered perfectly without executing the 
 - actions resolve in construction, buying, then movement order at year end;
 - the AI uses the recovered map and balance data with deterministic heuristics;
 - resource-specific purchase discounts are inferred from the original resource manager and descriptions;
+- queued ships carry one troop each, or two with the recovered Sea Carrier unit choice, matching the original localization and tutorial instructions;
 - network/Bluetooth/Ladder services are intentionally not contacted or emulated;
-- original CAF audio remains in the extracted preservation source but is not exposed to browsers because the obsolete encoding is not broadly supported.
+- selected battle CAF effects are converted ahead of time to browser-native PCM; the original CAF files remain only in the excluded archive.
 
 These choices are isolated in `web/src/engine.js` and can be refined as more historical evidence appears. The recovered raw data remains separate from game logic so later researchers can replace interpretations without repeating extraction.
 

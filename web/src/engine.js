@@ -68,6 +68,7 @@ export function newGame(data, options = {}) {
       cash: faction.factionInitialCash,
       defeated: false,
       worldUpgrades: [],
+      unitUpgrades: [],
       nukes: 0,
       railGunReady: 2010,
       conquests: 0,
@@ -108,8 +109,11 @@ export function validateSavedGame(value, data) {
   const countryNames = new Set(data.countries.map((country) => country.name));
   const validFactions = data.factions.every((source) => {
     const faction = value.factions?.[source.factionName];
+    const unitUpgrades = faction?.unitUpgrades ?? [];
     return faction && Number.isFinite(faction.cash) && faction.cash >= 0 && typeof faction.defeated === "boolean"
-      && Array.isArray(faction.worldUpgrades) && Number.isSafeInteger(faction.nukes) && faction.nukes >= 0
+      && Array.isArray(faction.worldUpgrades) && Array.isArray(unitUpgrades)
+      && unitUpgrades.every((item) => ["sea-carrier", "advanced-battleship"].includes(item)) && unitUpgrades.length <= 1
+      && Number.isSafeInteger(faction.nukes) && faction.nukes >= 0
       && Number.isSafeInteger(faction.railGunReady) && Number.isSafeInteger(faction.conquests) && faction.conquests >= 0
       && faction.general && typeof faction.general.name === "string" && Number.isSafeInteger(faction.general.level)
       && Number.isSafeInteger(faction.general.inactiveUntil);
@@ -126,8 +130,12 @@ export function validateSavedGame(value, data) {
     if (!action || typeof action.id !== "string" || !factionNames.has(action.faction) || !Number.isSafeInteger(action.quantity ?? 1)) return false;
     if (action.type === "buy") return countryNames.has(action.country) && UNIT_TYPES[action.unitType]
       && action.quantity > 0 && Number.isFinite(action.cost) && action.cost >= 0;
-    if (action.type === "move") return countryNames.has(action.from) && countryNames.has(action.to)
-      && UNIT_TYPES[action.unitType] && action.quantity > 0;
+    if (action.type === "move") {
+      const transportMultiplier = value.factions[action.faction].unitUpgrades?.includes("sea-carrier") ? 2 : 1;
+      return countryNames.has(action.from) && countryNames.has(action.to) && UNIT_TYPES[action.unitType] && action.quantity > 0
+        && (action.carriedTroops === undefined || (action.unitType === "ships" && Number.isSafeInteger(action.carriedTroops)
+          && action.carriedTroops >= 0 && action.carriedTroops <= action.quantity * transportMultiplier));
+    }
     if (action.type === "country-upgrade") return countryNames.has(action.country) && upgradeById(action.upgradeId)?.scope === "country"
       && Number.isFinite(action.cost) && action.cost >= 0;
     return false;
@@ -221,14 +229,50 @@ export function queueBuy(data, state, factionName, countryName, unitType, quanti
 }
 
 function committedUnits(state, factionName, countryName, unitType) {
-  return state.queue.filter((action) => action.type === "move" && action.faction === factionName && action.from === countryName && action.unitType === unitType)
+  const moved = state.queue.filter((action) => action.type === "move" && action.faction === factionName && action.from === countryName && action.unitType === unitType)
     .reduce((sum, action) => sum + action.quantity, 0);
+  const boarded = unitType === "troops" ? state.queue.filter((action) => action.type === "move" && action.faction === factionName && action.from === countryName && action.unitType === "ships")
+    .reduce((sum, action) => sum + (action.carriedTroops || 0), 0) : 0;
+  return moved + boarded;
 }
 
 export function availableUnitCount(state, factionName, countryName, unitType) {
   const country = state.countries[countryName];
   if (!country?.units || !UNIT_TYPES[unitType]) return 0;
   return Math.max(0, country.units[unitType] - committedUnits(state, factionName, countryName, unitType));
+}
+
+export function navalTransportMultiplier(state, factionName) {
+  return state.factions[factionName]?.unitUpgrades?.includes("sea-carrier") ? 2 : 1;
+}
+
+export function availableBoardingCapacity(state, factionName, shipActionId) {
+  const action = state.queue.find((item) => item.id === shipActionId && item.type === "move" && item.unitType === "ships" && item.faction === factionName);
+  if (!action) return 0;
+  const shipSpace = action.quantity * navalTransportMultiplier(state, factionName) - (action.carriedTroops || 0);
+  return Math.max(0, Math.min(shipSpace, availableUnitCount(state, factionName, action.from, "troops")));
+}
+
+export function boardTroops(state, factionName, shipActionId, quantity) {
+  ensurePlaying(state);
+  factionState(state, factionName);
+  const action = state.queue.find((item) => item.id === shipActionId && item.type === "move" && item.unitType === "ships" && item.faction === factionName);
+  if (!action) throw new GameRuleError("Queue a ship movement before boarding troops.");
+  const amount = positiveQuantity(quantity);
+  if (amount > availableBoardingCapacity(state, factionName, shipActionId)) throw new GameRuleError("Those ships do not have enough free troop capacity.");
+  action.carriedTroops = (action.carriedTroops || 0) + amount;
+  record(state, `${amount} troops boarded ships sailing from ${displayCountry(action.from)} to ${displayCountry(action.to)}.`);
+  return action;
+}
+
+export function chooseNavalDoctrine(state, factionName, doctrine) {
+  ensurePlaying(state);
+  const faction = factionState(state, factionName);
+  if (!["sea-carrier", "advanced-battleship"].includes(doctrine)) throw new GameRuleError("Unknown naval doctrine.");
+  faction.unitUpgrades ||= [];
+  if (faction.unitUpgrades.some((item) => ["sea-carrier", "advanced-battleship"].includes(item))) throw new GameRuleError("A naval doctrine has already been selected.");
+  faction.unitUpgrades.push(doctrine);
+  record(state, `${doctrine === "sea-carrier" ? "Sea Carrier" : "Advanced Battleship"} doctrine activated.`, "good");
 }
 
 export function canReach(data, state, factionName, fromName, toName, unitType) {
@@ -252,8 +296,11 @@ export function queueMove(data, state, factionName, fromName, toName, unitType, 
   const amount = positiveQuantity(quantity);
   if (!canReach(data, state, factionName, fromName, toName, unitType)) throw new GameRuleError("That unit cannot reach the target country.");
   if (availableUnitCount(state, factionName, fromName, unitType) < amount) throw new GameRuleError("Not enough uncommitted units in the source country.");
-  state.queue.push({ id: cryptoId(state), type: "move", faction: factionName, from: fromName, to: toName, unitType, quantity: amount });
+  const action = { id: cryptoId(state), type: "move", faction: factionName, from: fromName, to: toName, unitType, quantity: amount };
+  if (unitType === "ships") action.carriedTroops = 0;
+  state.queue.push(action);
   record(state, `${amount} ${UNIT_TYPES[unitType].label.toLowerCase()} ordered from ${displayCountry(fromName)} to ${displayCountry(toName)}.`);
+  return action;
 }
 
 export function queueUpgrade(data, state, factionName, countryName, upgradeId) {
@@ -350,6 +397,7 @@ function generalMultiplier(state, factionName) {
 function attackMultiplier(state, factionName, unitType) {
   let multiplier = generalMultiplier(state, factionName);
   if (ownsUpgrade(state, factionName, 10) && ["troops", "commandos"].includes(unitType)) multiplier *= 1.5;
+  if (unitType === "ships" && state.factions[factionName]?.unitUpgrades?.includes("advanced-battleship")) multiplier *= 1.5;
   return multiplier;
 }
 
@@ -361,6 +409,7 @@ function defenseMultiplier(state, countryName, unitType) {
   if (country.upgrades.includes(8)) multiplier *= 1.25;
   if (country.bribedBy) multiplier *= 0.5;
   if (ownsUpgrade(state, country.owner, 10) && ["troops", "commandos"].includes(unitType)) multiplier *= 0.75;
+  if (unitType === "ships" && state.factions[country.owner]?.unitUpgrades?.includes("advanced-battleship")) multiplier *= 1.5;
   return multiplier;
 }
 
@@ -371,57 +420,83 @@ export function countryDefense(data, state, countryName) {
   return Object.entries(UNIT_TYPES).reduce((total, [unitType, unit]) => total + country.units[unitType] * faction[unit.defenseKey] * defenseMultiplier(state, countryName, unitType), 0);
 }
 
-function resolveMove(data, state, action) {
+function resolveMove(data, state, action, battleEvents) {
   const from = state.countries[action.from];
   const to = state.countries[action.to];
-  if (!from || !to || from.owner !== action.faction || from.units[action.unitType] < action.quantity) {
+  const carriedTroops = action.unitType === "ships" ? (action.carriedTroops || 0) : 0;
+  if (!from || !to || from.owner !== action.faction || from.units[action.unitType] < action.quantity || from.units.troops < carriedTroops) {
     record(state, `Move from ${displayCountry(action.from)} failed because the source force changed.`, "bad");
     return;
   }
   from.units[action.unitType] -= action.quantity;
+  from.units.troops -= carriedTroops;
   if (to.owner === action.faction) {
     to.units[action.unitType] += action.quantity;
+    to.units.troops += carriedTroops;
     return;
   }
   if (to.nukedUntil > state.year) {
     record(state, `${displayCountry(action.to)} is still uninhabitable.`, "bad");
     from.units[action.unitType] += action.quantity;
+    from.units.troops += carriedTroops;
     return;
   }
 
   const faction = factionSource(data, action.faction);
-  const attack = action.quantity * faction[UNIT_TYPES[action.unitType].attackKey] * attackMultiplier(state, action.faction, action.unitType) * (0.86 + random(state) * 0.28);
+  const defender = to.owner;
+  const defendersBefore = { ...to.units };
+  const attack = (action.quantity * faction[UNIT_TYPES[action.unitType].attackKey] * attackMultiplier(state, action.faction, action.unitType)
+    + carriedTroops * faction.troopsAttackStrength * attackMultiplier(state, action.faction, "troops")) * (0.86 + random(state) * 0.28);
   const defense = Math.max(1, countryDefense(data, state, action.to)) * (0.86 + random(state) * 0.28);
   const won = attack > defense;
   const lossRatio = clamp((won ? defense : attack) / Math.max(1, attack + defense) * 1.55, 0.08, won ? 0.78 : 0.95);
   const survivors = Math.max(won ? 1 : 0, action.quantity - Math.ceil(action.quantity * lossRatio));
+  const troopSurvivors = Math.max(won && carriedTroops ? 1 : 0, carriedTroops - Math.ceil(carriedTroops * lossRatio));
   if (won) {
-    const oldOwner = to.owner;
     const defeatedTroops = to.units.troops;
     to.owner = action.faction;
     to.units = emptyUnits();
     to.units[action.unitType] = survivors;
+    to.units.troops += troopSurvivors;
     if (ownsUpgrade(state, action.faction, 18)) to.units.troops += Math.ceil(defeatedTroops * 0.5);
     if (ownsUpgrade(state, action.faction, 19)) to.upgrades = [0, 1, 15];
     else to.upgrades = [];
     state.factions[action.faction].conquests += 1;
     state.factions[action.faction].general.level = 1 + Math.min(3, Math.floor(state.factions[action.faction].conquests / 8));
-    record(state, `${FACTION_META[action.faction]?.code || action.faction} conquered ${displayCountry(action.to)}${oldOwner ? ` from ${FACTION_META[oldOwner]?.code || oldOwner}` : ""}.`, "good");
+    record(state, `${FACTION_META[action.faction]?.code || action.faction} conquered ${displayCountry(action.to)}${defender ? ` from ${FACTION_META[defender]?.code || defender}` : ""}.`, "good");
   } else {
     const attrition = clamp(attack / Math.max(1, defense) * 0.65, 0.05, 0.85);
     for (const unitType of Object.keys(UNIT_TYPES)) to.units[unitType] = Math.max(0, Math.round(to.units[unitType] * (1 - attrition)));
     record(state, `${FACTION_META[action.faction]?.code || action.faction} failed to take ${displayCountry(action.to)}.`, "bad");
   }
+  battleEvents.push({
+    type: "battle",
+    country: action.to,
+    from: action.from,
+    attacker: action.faction,
+    defender,
+    winner: to.owner,
+    unitType: action.unitType,
+    quantity: action.quantity,
+    carriedTroops,
+    won,
+    survivors,
+    troopSurvivors,
+    attackScore: Math.round(attack),
+    defenseScore: Math.round(defense),
+    defendersBefore,
+    defendersAfter: { ...to.units },
+  });
 }
 
-function resolveQueue(data, state) {
+function resolveQueue(data, state, battleEvents) {
   const ordering = { "country-upgrade": 0, buy: 1, move: 2 };
   const queue = [...state.queue].sort((a, b) => ordering[a.type] - ordering[b.type]);
   state.queue = [];
   for (const action of queue) {
     if (action.type === "buy" && state.countries[action.country]?.owner === action.faction) state.countries[action.country].units[action.unitType] += action.quantity;
     if (action.type === "country-upgrade" && state.countries[action.country]?.owner === action.faction) state.countries[action.country].upgrades.push(action.upgradeId);
-    if (action.type === "move") resolveMove(data, state, action);
+    if (action.type === "move") resolveMove(data, state, action, battleEvents);
   }
 }
 
@@ -504,10 +579,10 @@ export function checkVictory(state) {
   return state.status;
 }
 
-export function endTurn(data, state) {
+export function endTurn(data, state, battleEvents = []) {
   ensurePlaying(state);
   for (const factionName of Object.keys(state.factions)) if (factionName !== state.playerFaction) aiPlan(data, state, factionName);
-  resolveQueue(data, state);
+  resolveQueue(data, state, battleEvents);
   updateDefeatedFactions(state);
   advanceEconomy(data, state);
   state.year += 1;

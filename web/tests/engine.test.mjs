@@ -3,12 +3,16 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  availableBoardingCapacity,
   availableUnitCount,
   availableUpgrades,
+  boardTroops,
   buyWorldUpgrade,
   cancelAction,
+  chooseNavalDoctrine,
   endTurn,
   maxPurchasableUnits,
+  navalTransportMultiplier,
   newGame,
   queueBuy,
   queueMove,
@@ -100,6 +104,46 @@ test("the available garrison excludes units committed to earlier orders", () => 
   queueMove(data, state, USA, "UNITED_STATES", "CANADA", "troops", 49);
   assert.equal(availableUnitCount(state, USA, "UNITED_STATES", "troops"), 1);
   assert.throws(() => queueMove(data, state, USA, "UNITED_STATES", "MEXICO", "troops", 2), /uncommitted units/);
+});
+
+test("queued ships can carry available troops along the same route", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 18 });
+  const alaskaTroops = state.countries.ALASKA.units.troops;
+  const fleet = queueMove(data, state, USA, "UNITED_STATES", "ALASKA", "ships", 10);
+  assert.equal(availableBoardingCapacity(state, USA, fleet.id), 10);
+  boardTroops(state, USA, fleet.id, 10);
+  assert.equal(fleet.carriedTroops, 10);
+  assert.equal(availableUnitCount(state, USA, "UNITED_STATES", "troops"), 40);
+  endTurn(data, state);
+  assert.equal(state.countries.ALASKA.units.troops, alaskaTroops + 10);
+});
+
+test("Sea Carrier doubles troop space and is a permanent naval choice", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 19 });
+  state.countries.UNITED_STATES.units.troops = 100;
+  chooseNavalDoctrine(state, USA, "sea-carrier");
+  assert.equal(navalTransportMultiplier(state, USA), 2);
+  const fleet = queueMove(data, state, USA, "UNITED_STATES", "ALASKA", "ships", 30);
+  assert.equal(availableBoardingCapacity(state, USA, fleet.id), 60);
+  boardTroops(state, USA, fleet.id, 60);
+  assert.throws(() => chooseNavalDoctrine(state, USA, "advanced-battleship"), /already been selected/);
+});
+
+test("battle resolution reports naval landings for the presentation layer", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 20 });
+  for (const [name, faction] of Object.entries(state.factions)) if (name !== USA) faction.defeated = true;
+  state.countries.ICELAND.owner = null;
+  state.countries.ICELAND.units = { troops: 0, ships: 0, planes: 0, missiles: 0, commandos: 0 };
+  const fleet = queueMove(data, state, USA, "UNITED_STATES", "ICELAND", "ships", 5);
+  boardTroops(state, USA, fleet.id, 5);
+  const battles = [];
+  endTurn(data, state, battles);
+  const landing = battles.find((battle) => battle.country === "ICELAND" && battle.attacker === USA);
+  assert.ok(landing);
+  assert.equal(landing.carriedTroops, 5);
+  assert.equal(landing.won, true);
+  assert.equal(state.countries.ICELAND.owner, USA);
+  assert.ok(state.countries.ICELAND.units.troops > 0);
 });
 
 test("original faction upgrade bitfields expose the expected research", () => {
