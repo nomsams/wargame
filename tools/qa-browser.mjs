@@ -104,6 +104,19 @@ for (let attempt = 0; attempt < 300; attempt += 1) {
 if (!appReady) throw new Error(`Wargame did not finish loading within 30 seconds. ${JSON.stringify({ runtimeErrors, browserErrors })}`);
 await delay(800);
 
+const menuTypography = await evaluate(`(() => {
+  const buttons = [...document.querySelectorAll('.stencil-button')];
+  const styles = buttons.map((button) => {
+    const rect = button.getBoundingClientRect();
+    const style = getComputedStyle(button);
+    return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, height: rect.height, bottom: rect.bottom };
+  });
+  return { count: buttons.length, styles, fits: styles.every((style) => style.bottom <= innerHeight) };
+})()`);
+if (menuTypography.count !== 5 || !menuTypography.fits || new Set(menuTypography.styles.map((style) => `${style.fontFamily}|${style.fontSize}|${style.fontWeight}|${style.height}`)).size !== 1) {
+  throw new Error(`Main-menu typography is inconsistent or does not fit: ${JSON.stringify(menuTypography)}.`);
+}
+
 await evaluate("document.querySelector('#new-game-button').click()");
 await delay(250);
 await screenshot("setup.png");
@@ -192,9 +205,8 @@ const mapTargets = await evaluate(`(async () => {
   return { russia: point('RUSSIA'), unitedStates: point('UNITED_STATES'), mexico: point('MEXICO') };
 })()`);
 async function clickMapPoint(point) {
-  await evaluate(`document.querySelector('#world-map').dispatchEvent(new PointerEvent('pointerup', {
-    clientX: ${JSON.stringify(point.x)}, clientY: ${JSON.stringify(point.y)}, pointerId: 1, bubbles: true
-  }))`);
+  await command("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
+  await command("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });
   await delay(100);
 }
 await clickMapPoint(mapTargets.russia);
@@ -284,9 +296,10 @@ await delay(120);
 const persistentUpgrade = await evaluate(`({
   open: document.querySelector('#command-dialog').open,
   title: document.querySelector('#dialog-title').textContent,
-  queuedLabel: document.querySelector('[data-mode="country"][data-upgrade="6"]')?.textContent
+  queuedLabel: document.querySelector('[data-mode="country"][data-upgrade="6"]')?.textContent,
+  redundantSupplyCenter: Boolean(document.querySelector('[data-mode="country"][data-upgrade="1"]'))
 })`);
-if (!persistentUpgrade.open || persistentUpgrade.queuedLabel !== "Queued ✓") throw new Error(`Upgrade dialog did not remain open with queued state: ${JSON.stringify(persistentUpgrade)}.`);
+if (!persistentUpgrade.open || persistentUpgrade.queuedLabel !== "Queued ✓" || persistentUpgrade.redundantSupplyCenter) throw new Error(`Upgrade dialog state or starting-country Supply Center filtering failed: ${JSON.stringify(persistentUpgrade)}.`);
 await evaluate("document.querySelector('.dialog-close').click()");
 
 await clickMapPoint(mapTargets.mexico);
@@ -359,14 +372,21 @@ await screenshot("game-after-turn.png");
 const afterTurn = await evaluate(`({ year: document.querySelector('#status-year').textContent, queue: document.querySelector('#queue-count').textContent, cash: document.querySelector('#status-cash').textContent, resourceLog: [...document.querySelectorAll('.log-item strong')].some((item) => item.textContent.includes('Country resources delivered')) })`);
 
 await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+await command("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 2 });
 await evaluate("window.dispatchEvent(new Event('resize'))");
 await delay(350);
+await evaluate("document.querySelector('#close-country')?.click(); document.querySelector('#reset-map').click(); window.scrollTo(0, 0)");
+await delay(120);
 await screenshot("game-mobile.png");
 const mobile = await evaluate(`({
   viewport: [innerWidth, innerHeight],
   bodyWidth: document.body.scrollWidth,
+  scrollY,
   panelVisible: document.querySelector('#country-panel').classList.contains('has-selection'),
   canvasWidth: Math.round(document.querySelector('#world-map').getBoundingClientRect().width),
+  projectionAspect: Number(document.querySelector('#world-map').dataset.projectionAspect),
+  mapHintVisible: getComputedStyle(document.querySelector('.map-hint')).display !== 'none',
+  settingsIconFilter: getComputedStyle(document.querySelector('#settings-button img')).filter,
   toolbar: (() => {
     const bar = document.querySelector('.command-bar');
     const buttons = [...bar.querySelectorAll('button')].map((button) => {
@@ -380,7 +400,8 @@ const mobile = await evaluate(`({
     return { id: button.id, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height };
   })
 })`);
-if (mobile.bodyWidth > mobile.viewport[0]) throw new Error(`Mobile page overflows horizontally: ${JSON.stringify(mobile)}.`);
+if (mobile.bodyWidth > mobile.viewport[0] || mobile.scrollY !== 0) throw new Error(`Mobile page overflows or retained a prior screen's scroll offset: ${JSON.stringify(mobile)}.`);
+if (Math.abs(mobile.projectionAspect - 1.5) > .01 || !mobile.mapHintVisible || mobile.settingsIconFilter === 'none') throw new Error(`Portrait projection, touch hint, or Settings icon styling failed: ${JSON.stringify(mobile)}.`);
 if (mobile.toolbar.scrollWidth > mobile.toolbar.clientWidth) throw new Error(`Mobile toolbar requires horizontal scrolling: ${JSON.stringify(mobile.toolbar)}.`);
 for (const button of mobile.toolbar.buttons) {
   if (button.left < 0 || button.right > mobile.viewport[0] || button.top < 0 || button.bottom > mobile.viewport[1] || button.height < 44) {
@@ -392,6 +413,40 @@ for (const button of mobile.countryActions) {
     throw new Error(`Mobile country action is not fully reachable: ${JSON.stringify(button)}.`);
   }
 }
+
+const pinchCenter = await evaluate(`(() => {
+  const rect = document.querySelector('#world-map').getBoundingClientRect();
+  return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+})()`);
+await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [
+  { x: pinchCenter.x - 35, y: pinchCenter.y, id: 1 },
+  { x: pinchCenter.x + 35, y: pinchCenter.y, id: 2 },
+] });
+await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [
+  { x: pinchCenter.x - 85, y: pinchCenter.y, id: 1 },
+  { x: pinchCenter.x + 85, y: pinchCenter.y, id: 2 },
+] });
+await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+await delay(120);
+const pinchZoom = await evaluate("Number(document.querySelector('#world-map').dataset.zoom)");
+if (pinchZoom < 2) throw new Error(`Two-finger pinch did not zoom the map: ${pinchZoom}.`);
+await screenshot("game-mobile-pinched.png");
+await evaluate("document.querySelector('#reset-map').click()");
+
+await command("Emulation.setDeviceMetricsOverride", { width: 844, height: 390, deviceScaleFactor: 1, mobile: true });
+await evaluate("window.dispatchEvent(new Event('resize')); window.scrollTo(0, 0)");
+await delay(250);
+const mobileLandscape = await evaluate(`(() => {
+  const canvas = document.querySelector('#world-map');
+  const rect = canvas.getBoundingClientRect();
+  return { viewport: [innerWidth, innerHeight], bodyWidth: document.body.scrollWidth, canvas: [rect.width, rect.height], projectionAspect: Number(canvas.dataset.projectionAspect), toolbarBottom: document.querySelector('.command-bar').getBoundingClientRect().bottom };
+})()`);
+if (mobileLandscape.bodyWidth > mobileLandscape.viewport[0] || mobileLandscape.projectionAspect < 1.5 || mobileLandscape.toolbarBottom > mobileLandscape.viewport[1]) throw new Error(`Landscape mobile layout failed: ${JSON.stringify(mobileLandscape)}.`);
+await screenshot("game-mobile-landscape.png");
+
+await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+await evaluate("window.dispatchEvent(new Event('resize')); window.scrollTo(0, 0)");
+await delay(250);
 
 await evaluate("document.querySelector('#objective-button').click()");
 await delay(120);
@@ -437,7 +492,7 @@ if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[
 }
 await screenshot("dialog-mobile.png");
 
-console.log(JSON.stringify({ setup, start, saveTransfer, saveDownload, saveImport, saveImportLoaded, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, mobileForces, settingsDialog, mobileSave, exitDialog, mobileDialog, runtimeErrors }, null, 2));
+console.log(JSON.stringify({ menuTypography, setup, start, saveTransfer, saveDownload, saveImport, saveImportLoaded, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, pinchZoom, mobileLandscape, mobileForces, settingsDialog, mobileSave, exitDialog, mobileDialog, runtimeErrors }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   if (process.platform === "win32" && edge.pid) {
@@ -448,15 +503,20 @@ console.log(JSON.stringify({ setup, start, saveTransfer, saveDownload, saveImpor
     await Promise.race([new Promise((resolve) => edge.once("exit", resolve)), delay(2000)]);
   }
   if (process.platform === "win32") {
-    const remover = spawn("powershell.exe", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "& { param([string]$target) Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }",
-      profileDirectory,
-    ], { stdio: "ignore", windowsHide: true });
-    const removalCode = await Promise.race([new Promise((resolve) => remover.once("exit", resolve)), delay(10000).then(() => null)]);
-    if (removalCode !== 0) throw new Error(`Could not remove temporary browser profile ${profileDirectory}.`);
+    let removed = false;
+    for (let attempt = 0; attempt < 6 && !removed; attempt += 1) {
+      const remover = spawn("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "& { param([string]$target) Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }",
+        profileDirectory,
+      ], { stdio: "ignore", windowsHide: true });
+      const removalCode = await Promise.race([new Promise((resolve) => remover.once("exit", resolve)), delay(10000).then(() => null)]);
+      removed = removalCode === 0;
+      if (!removed) await delay(500 * (attempt + 1));
+    }
+    if (!removed) console.warn(`Could not remove temporary browser profile ${profileDirectory}; it can be deleted after Edge releases its final file handle.`);
   } else fs.rmSync(profileDirectory, { recursive: true, force: true });
 }
 if (runtimeErrors.length) process.exitCode = 1;

@@ -37,6 +37,12 @@ test("recovered archive contains the complete original board", () => {
   assert.equal(data.map.indices.length, 14670);
   assert.deepEqual(data.map.countries.map((country) => country.name), data.countries.map((country) => country.name));
   assert.ok(data.map.indices.every((index) => index >= 0 && index < data.map.vertices.length));
+  assert.ok(data.countries.every((country) => Number.isInteger(country.countryResource) && country.countryResource >= 0 && country.countryResource <= 5));
+  assert.deepEqual(data.countries.reduce((counts, country) => {
+    counts[country.countryResource] = (counts[country.countryResource] || 0) + 1;
+    return counts;
+  }, {}), { 0: 14, 1: 17, 2: 8, 3: 22, 4: 7, 5: 23 });
+  assert.equal(data.countries.find((country) => country.name === "SWEDEN").countryResource, 1);
 });
 
 test("new campaigns preserve faction and starting-country data", () => {
@@ -199,7 +205,19 @@ test("battle resolution reports naval landings for the presentation layer", () =
 test("original faction upgrade bitfields expose the expected research", () => {
   const state = newGame(data, { playerFaction: USA, seed: 8 });
   assert.deepEqual(availableUpgrades(data, state, USA, "world").map((upgrade) => upgrade.id), [12, 17]);
-  assert.deepEqual(availableUpgrades(data, state, USA, "country", "UNITED_STATES").map((upgrade) => upgrade.id), [0, 1, 6, 15]);
+  assert.deepEqual(availableUpgrades(data, state, USA, "country", "UNITED_STATES").map((upgrade) => upgrade.id), [0, 6, 15]);
+});
+
+test("Supply Centers are offered only where they unlock purchasing", () => {
+  const state = newGame(data, { playerFaction: USA, seed: 81 });
+  assert.equal(canBuyIn(data, state, USA, "UNITED_STATES"), true);
+  assert.ok(!availableUpgrades(data, state, USA, "country", "UNITED_STATES").some((upgrade) => upgrade.id === 1));
+
+  state.countries.MEXICO.owner = USA;
+  assert.equal(canBuyIn(data, state, USA, "MEXICO"), false);
+  assert.ok(availableUpgrades(data, state, USA, "country", "MEXICO").some((upgrade) => upgrade.id === 1));
+  state.countries.MEXICO.upgrades.push(1);
+  assert.equal(canBuyIn(data, state, USA, "MEXICO"), true);
 });
 
 test("a country upgrade cannot be queued and charged twice", () => {

@@ -32,9 +32,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .menu-card { position: relative; z-index: 1; min-height: 100vh; width: min(480px, 100%); display: flex; flex-direction: column; justify-content: flex-end; gap: 24px; padding: clamp(28px, 7vw, 72px); }
 .preservation-mark, .eyebrow { margin: 0; color: var(--orange); font-size: .72rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
 .menu-actions { display: grid; gap: 10px; }
-.stencil-button { width: 100%; min-height: 58px; border: 1px solid rgba(255,255,255,.22); border-left: 5px solid var(--orange); border-radius: 3px; background: linear-gradient(90deg, rgba(8,11,16,.94), rgba(18,24,31,.7)); color: white; text-align: left; padding: 0 22px; font-size: clamp(1.25rem, 3vw, 1.8rem); font-weight: 900; letter-spacing: .06em; text-transform: uppercase; box-shadow: var(--shadow); transform: skew(-2deg); transition: 150ms ease; }
+.stencil-button { width: 100%; min-height: 56px; border: 1px solid rgba(255,255,255,.22); border-left: 5px solid var(--orange); border-radius: 3px; background: linear-gradient(90deg, rgba(8,11,16,.94), rgba(18,24,31,.7)); color: white; text-align: left; padding: 0 22px; font-size: clamp(1.05rem, 3vw, 1.35rem); font-weight: 900; letter-spacing: .06em; text-transform: uppercase; box-shadow: var(--shadow); transform: skew(-2deg); transition: 150ms ease; }
 .stencil-button:hover, .stencil-button:focus-visible { border-color: var(--orange); transform: translateX(7px) skew(-2deg); }
-.stencil-button.minor { min-height: 44px; color: #bec8cf; font-size: .9rem; }
 
 .setup-screen, .document-screen { padding: clamp(18px, 4vw, 48px); background: radial-gradient(circle at 75% 0, #203045, #0a1019 52%, #05080d); }
 .setup-header, .document-screen > header { max-width: 1180px; margin: auto; display: flex; align-items: center; gap: 20px; }
@@ -103,6 +102,7 @@ input, select { width: 100%; margin-top: 7px; border: 1px solid var(--line); bor
 .command-bar button { position: relative; min-width: 84px; display: grid; place-content: center; justify-items: center; gap: 2px; border: 0; border-right: 1px solid #2b3949; background: transparent; color: #b9c7d1; font-size: .69rem; }
 .command-bar button:hover { background: rgba(255,255,255,.06); color: white; }
 .command-bar img { width: 26px; height: 26px; object-fit: contain; }
+#settings-button img { width: 20px; height: 20px; border-radius: 1px; filter: sepia(1) saturate(6) hue-rotate(355deg) brightness(1.15); outline: 2px solid #d6b717; outline-offset: 2px; }
 .command-bar b { position: absolute; top: 6px; right: 10px; min-width: 18px; border-radius: 9px; background: var(--red); color: white; font-size: .65rem; line-height: 18px; }
 .command-bar .end-turn { min-width: 180px; margin-left: auto; border-left: 1px solid #6d4b14; background: linear-gradient(#a36a0a, #5b3705); color: white; font-size: .82rem; text-transform: uppercase; }
 .command-bar .end-turn small { color: #ffdb94; font-size: .6rem; }
@@ -235,7 +235,10 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
   .battlefield { height: calc(100vh - var(--status-height) - var(--toolbar-height)); }
   .map-controls button { width: 44px; height: 44px; }
   .country-close { width: 44px; height: 44px; }
-  .map-hint { display: none; }
+  .menu-card { gap: 15px; padding: 22px; }
+  .menu-actions { gap: 8px; }
+  .stencil-button { min-height: 52px; font-size: 1rem; }
+  .map-hint { right: 10px; bottom: 6px; left: auto; max-width: calc(100% - 20px); padding: 3px 6px; border-radius: 3px; background: rgba(2,9,19,.64); font-size: .63rem; text-align: right; }
   .command-bar button { font-size: .62rem; }
   .command-bar img { width: 23px; height: 23px; }
   .command-bar b { top: 4px; right: 8px; }

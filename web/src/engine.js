@@ -160,6 +160,9 @@ export function availableUpgrades(data, state, factionName, scope, countryName =
     if (!factionCanBuild(faction, upgrade.id) && !(quickLearner && scope === "country" && upgrade.id >= 3 && upgrade.id <= 8)) return false;
     if (scope === "world") return !ownsUpgrade(state, factionName, upgrade.id);
     if (!countryName) return true;
+    // Original starting countries already support purchases, so a Supply
+    // Center there would spend money without unlocking any capability.
+    if (upgrade.id === 1 && countrySource(data, countryName)?.faction === factionName) return false;
     const alreadyQueued = state.queue.some((action) => action.type === "country-upgrade"
       && action.faction === factionName && action.country === countryName && action.upgradeId === upgrade.id);
     return !state.countries[countryName].upgrades.includes(upgrade.id) && !alreadyQueued;

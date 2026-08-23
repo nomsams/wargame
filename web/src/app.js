@@ -26,7 +26,7 @@ import {
   validateSavedGame,
 } from "./engine.js";
 import { FACTION_META, OBJECTIVES, RESOURCE_IMAGES, RESOURCE_NAMES, SPY_ACTIONS, UNIT_TYPES, upgradeById } from "./config.js";
-import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, projectMapPoint } from "./projection.js";
+import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, mapProjectionFrame, pinchMapView, projectMapPoint } from "./projection.js";
 import { MAX_SAVE_FILE_BYTES, SaveTransferError, parseSaveText, saveFilename, serializeSave } from "./save-transfer.js";
 
 const SAVE_KEY = "wargame-preservation-save-v1";
@@ -53,6 +53,8 @@ const context = canvas.getContext("2d", { alpha: false });
 const hitCanvas = document.createElement("canvas");
 const hitContext = hitCanvas.getContext("2d", { willReadFrequently: true });
 const mapView = { zoom: 1, panX: 0, panY: 0, dragging: false, moved: 0, lastX: 0, lastY: 0 };
+const mapPointers = new Map();
+let pinchGesture = null;
 const countryEdges = [];
 const audioSources = {
   march: "./assets/audio/marchSound.wav",
@@ -77,6 +79,11 @@ function countryLabel(name) {
 
 function countriesAlphabetically(countries = gameData.countries) {
   return [...countries].sort((first, second) => countryLabel(first.name).localeCompare(countryLabel(second.name), undefined, { sensitivity: "base" }));
+}
+
+function initialCountrySelection(factionName) {
+  if (window.matchMedia("(max-width: 850px)").matches) return null;
+  return gameData.factions.find((faction) => faction.factionName === factionName)?.capitalCountry || null;
 }
 
 function resourceBonusText(countryName, revealInfrastructure = true) {
@@ -125,6 +132,7 @@ function playBattleSound(name, volume = 0.72) {
 
 function showScreen(id) {
   $$(".screen").forEach((screen) => screen.classList.toggle("active", screen.id === id));
+  window.scrollTo(0, 0);
   if (id === "menu-screen") updateResumeButton();
   if (id === "game-screen") requestAnimationFrame(() => { resizeMap(); renderAll(); });
 }
@@ -229,7 +237,7 @@ function openImportReview(importedGame, sourceName) {
   openDialog("Validated save file", "Load Campaign?", `<p><strong>${escapeHtml(faction)}</strong> · Year ${importedGame.year} · ${owned} countries</p><p class="section-help">Source: ${escapeHtml(sourceName)}. Loading it replaces this browser's local save. Download the current campaign first if you want a separate backup.</p><div class="dialog-actions import-actions"><button id="confirm-import" class="primary-button" type="button">Load imported campaign</button><button id="cancel-import" class="secondary-button" type="button">Cancel</button></div>`, (root) => {
     $("#confirm-import", root).addEventListener("click", () => {
       gameState = importedGame;
-      selectedCountry = gameData.factions.find((factionEntry) => factionEntry.factionName === gameState.playerFaction)?.capitalCountry || null;
+      selectedCountry = initialCountrySelection(gameState.playerFaction);
       localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
       sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
       closeDialog();
@@ -290,7 +298,7 @@ function startCampaign() {
     objective: $("#objective-select").value,
     difficulty: $("#difficulty-select").value,
   });
-  selectedCountry = gameData.factions.find((faction) => faction.factionName === selectedFaction)?.capitalCountry || null;
+  selectedCountry = initialCountrySelection(selectedFaction);
   autosave();
   showScreen("game-screen");
 }
@@ -371,6 +379,9 @@ function traceEdges(target, edges, width, height) {
 function drawMap() {
   if (!gameData || !canvas.width) return;
   const { width, height, ratio } = logicalSize();
+  const frame = mapProjectionFrame(width, height);
+  canvas.dataset.zoom = mapView.zoom.toFixed(3);
+  canvas.dataset.projectionAspect = (frame.width / frame.height).toFixed(3);
   context.setTransform(1, 0, 0, 1, 0, 0);
   const gradient = context.createRadialGradient(canvas.width * .5, canvas.height * .45, 0, canvas.width * .5, canvas.height * .5, canvas.width * .65);
   gradient.addColorStop(0, "#15417a"); gradient.addColorStop(.65, "#071d45"); gradient.addColorStop(1, "#020a17");
@@ -456,7 +467,7 @@ function renderCountryPanel() {
   panel.style.setProperty("--owner", ownerMeta.color);
   panel.style.setProperty("--accent", ownerMeta.accent);
   panel.innerHTML = `
-    <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><span>${escapeHtml(resource)} · $${source.cashPerTurn}/year<small>${escapeHtml(resourceBonusText(selectedCountry, Boolean(view.upgrades)))}</small></span></div></div>
+    <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><span>${escapeHtml(resource)} · $${source.cashPerTurn}/year<small>Yearly resource bonus: ${escapeHtml(resourceBonusText(selectedCountry, Boolean(view.upgrades)))}</small></span></div></div>
     <div class="country-actions">
       ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action" ${canPurchaseHere ? "" : "disabled title=\"Build a Supply Center to buy units here\""}>Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}` : ""}
       ${hostile ? `<button id="spy-country-action">Spy</button>` : ""}${attackable ? `<button id="attack-country-action" class="attack">Attack Country</button>` : ""}
@@ -918,7 +929,7 @@ function buildManual() {
     <h3>2. Moving, attacking, and naval transport</h3><p>Troops cross adjoining land borders. Ships travel between coastal countries. You can plan from either direction: select one of your countries and choose Move / Attack, or select an uncontrolled target and choose Attack Country to commit forces from several source countries. Target lists are sorted A–Z; italic entries are outside your control. After queuing a ship movement, board troops onto that fleet from the country panel, attack planner, or Action Queue. Each ship carries one troop, or two after selecting Sea Carrier. Planes, missiles, and commandos can reach distant targets.</p>
     <h3>3. Economy, resources, and buying</h3><p>Every controlled country pays cash each year and supplies its recovered national-resource bonus: Heavy Industry produces planes, Finance produces cash, Agriculture troops, Ore missiles, and Fishing ships. Petroleum discounts ships, planes, and missiles. A Power Plant doubles the local resource effect, and controlling more than nine countries with the same resource grants its synergy bonus at your capital. Units may be bought in original faction countries or anywhere with a Supply Center.</p>
     <h3>4. Combat</h3><p>Each faction has the original unit attack, defence, and cost profile recovered from the app. Generals, country defences, bribery, and upgrades modify combat. Battles involving your faction zoom to the contested country and replay with the preserved marching and combat sounds. Use Show result or Skip all to shorten the sequence.</p>
-    <h3>5. Upgrades and spying</h3><p>Country upgrades include AWFDS, Supply Centers, Power Plants, and a faction-specific ability. World upgrades unlock decisive faction powers. Intelligence reveals a hidden garrison; Bribery halves its defence for the current year; 00 Agents unlock hits against rival generals.</p>
+    <h3>5. Upgrades and spying</h3><p>Country upgrades include AWFDS, Supply Centers, Power Plants, and a faction-specific ability. Supply Centers are only needed—and therefore only offered—in conquered countries where purchasing is not already available. World upgrades unlock decisive faction powers. Intelligence reveals a hidden garrison; Bribery halves its defence for the current year; 00 Agents unlock hits against rival generals.</p>
     <h3>6. General, forces, end turn, and saves</h3><p>The General view lists every controlled-country garrison A–Z, including troops, ships, planes, missiles, and commandos. End Turn lets all computer factions plan, then resolves purchases, construction, moves, resource grants, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order. The Save toolbar opens browser save, download, validated upload, and phone-sharing controls. Native sharing can use AirDrop, Quick Share, or Nearby Share where the device supports it; download is the universal fallback.</p>`;
 }
 
@@ -932,9 +943,88 @@ function checkEnding() {
   $("#ending-copy").textContent = victory ? "Your objective is complete. The world has a new order." : "Your last country has fallen. History belongs to another faction.";
 }
 
+function activePinchMetrics() {
+  const [first, second] = [...mapPointers.values()];
+  if (!first || !second) return null;
+  const rect = canvas.getBoundingClientRect();
+  return {
+    distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+    centerX: (first.x + second.x) / 2 - rect.left,
+    centerY: (first.y + second.y) / 2 - rect.top,
+    canvasWidth: rect.width,
+    canvasHeight: rect.height,
+  };
+}
+
+function beginPinchGesture() {
+  const metrics = activePinchMetrics();
+  if (!metrics) { pinchGesture = null; return; }
+  pinchGesture = { ...metrics, zoom: mapView.zoom, panX: mapView.panX, panY: mapView.panY };
+  mapView.dragging = false;
+  mapView.moved = 10;
+}
+
+function handleMapPointerDown(event) {
+  event.preventDefault();
+  try { canvas.setPointerCapture(event.pointerId); } catch {}
+  mapPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (mapPointers.size > 1) { beginPinchGesture(); return; }
+  pinchGesture = null;
+  mapView.dragging = true;
+  mapView.moved = 0;
+  mapView.lastX = event.clientX;
+  mapView.lastY = event.clientY;
+}
+
+function handleMapPointerMove(event) {
+  if (!mapPointers.has(event.pointerId)) return;
+  event.preventDefault();
+  mapPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (mapPointers.size > 1) {
+    if (!pinchGesture) beginPinchGesture();
+    const metrics = activePinchMetrics();
+    if (!metrics || !pinchGesture) return;
+    Object.assign(mapView, pinchMapView(pinchGesture, metrics));
+    drawMap();
+    return;
+  }
+  if (!mapView.dragging) return;
+  const dx = event.clientX - mapView.lastX;
+  const dy = event.clientY - mapView.lastY;
+  mapView.moved += Math.abs(dx) + Math.abs(dy);
+  if (mapView.zoom > 1) {
+    mapView.panX += dx;
+    mapView.panY += dy;
+    drawMap();
+  }
+  mapView.lastX = event.clientX;
+  mapView.lastY = event.clientY;
+}
+
+function finishMapPointer(event, allowPick) {
+  if (!mapPointers.has(event.pointerId)) return;
+  const wasSingleTap = allowPick && mapPointers.size === 1 && !pinchGesture && mapView.moved < 6;
+  mapPointers.delete(event.pointerId);
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  if (wasSingleTap) pickCountry(event);
+  if (mapPointers.size > 1) beginPinchGesture();
+  else if (mapPointers.size === 1) {
+    const remaining = [...mapPointers.values()][0];
+    pinchGesture = null;
+    mapView.dragging = true;
+    mapView.moved = 10;
+    mapView.lastX = remaining.x;
+    mapView.lastY = remaining.y;
+  } else {
+    pinchGesture = null;
+    mapView.dragging = false;
+    mapView.moved = 0;
+  }
+}
+
 function bindEvents() {
   $("#new-game-button").addEventListener("click", () => showScreen("setup-screen"));
-  $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { sessionSaveBaseline = localStorage.getItem(SAVE_KEY); gameState = saved; selectedCountry = gameData.factions.find((faction) => faction.factionName === gameState.playerFaction)?.capitalCountry; showScreen("game-screen"); } });
+  $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { sessionSaveBaseline = localStorage.getItem(SAVE_KEY); gameState = saved; selectedCountry = initialCountrySelection(gameState.playerFaction); showScreen("game-screen"); } });
   $("#import-save-button").addEventListener("click", () => $("#save-file-input").click());
   $("#save-file-input").addEventListener("change", (event) => importCampaignFile(event.target.files[0]));
   $("#manual-button").addEventListener("click", () => showScreen("manual-screen"));
@@ -962,15 +1052,11 @@ function bindEvents() {
   $("#zoom-out").addEventListener("click", () => { mapView.zoom = Math.max(1, mapView.zoom / 1.25); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); });
   $("#reset-map").addEventListener("click", () => { mapView.zoom = 1; mapView.panX = mapView.panY = 0; drawMap(); });
   canvas.addEventListener("wheel", (event) => { event.preventDefault(); mapView.zoom = clampMapZoom(mapView.zoom * (event.deltaY < 0 ? 1.12 : .9)); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); }, { passive: false });
-  canvas.addEventListener("pointerdown", (event) => { canvas.setPointerCapture(event.pointerId); mapView.dragging = true; mapView.moved = 0; mapView.lastX = event.clientX; mapView.lastY = event.clientY; });
-  canvas.addEventListener("pointermove", (event) => { if (!mapView.dragging) return; const dx = event.clientX - mapView.lastX; const dy = event.clientY - mapView.lastY; mapView.moved += Math.abs(dx) + Math.abs(dy); if (mapView.zoom > 1) { mapView.panX += dx; mapView.panY += dy; drawMap(); } mapView.lastX = event.clientX; mapView.lastY = event.clientY; });
-  canvas.addEventListener("pointerup", (event) => {
-    if (mapView.moved < 6) pickCountry(event);
-    mapView.dragging = false;
-    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-  });
-  canvas.addEventListener("pointercancel", () => { mapView.dragging = false; mapView.moved = 0; });
-  canvas.addEventListener("lostpointercapture", () => { mapView.dragging = false; });
+  canvas.addEventListener("pointerdown", handleMapPointerDown);
+  canvas.addEventListener("pointermove", handleMapPointerMove);
+  canvas.addEventListener("pointerup", (event) => finishMapPointer(event, true));
+  canvas.addEventListener("pointercancel", (event) => finishMapPointer(event, false));
+  canvas.addEventListener("lostpointercapture", (event) => finishMapPointer(event, false));
   canvas.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();

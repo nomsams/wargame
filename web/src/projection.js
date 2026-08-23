@@ -7,14 +7,40 @@ export const CAPITAL_MARKER_OVERRIDES = {
   JAPAN: [2153, -22133.33],
 };
 
+export function mapProjectionFrame(width, height, padding = 18, minimumAspect = 1.5) {
+  const frameWidth = width;
+  const frameHeight = width / height < minimumAspect ? width / minimumAspect : height;
+  return {
+    x: 0,
+    y: (height - frameHeight) / 2,
+    width: frameWidth,
+    height: frameHeight,
+    padding: Math.min(padding, frameWidth / 4, frameHeight / 4),
+  };
+}
+
 export function projectMapPoint(vertex, halfSize, width, height, padding = 18) {
   const [halfLatitude, halfLongitude] = halfSize;
+  const frame = mapProjectionFrame(width, height, padding);
   return [
     // The archived map stores longitude as west-positive. Canvas x grows
     // eastward, so invert it here for a conventional world orientation.
-    padding + (halfLongitude - vertex[1]) / (halfLongitude * 2) * (width - padding * 2),
-    padding + (halfLatitude - vertex[0]) / (halfLatitude * 2) * (height - padding * 2),
+    frame.x + frame.padding + (halfLongitude - vertex[1]) / (halfLongitude * 2) * (frame.width - frame.padding * 2),
+    frame.y + frame.padding + (halfLatitude - vertex[0]) / (halfLatitude * 2) * (frame.height - frame.padding * 2),
   ];
+}
+
+export function pinchMapView(start, current, minimumZoom = 1, maximumZoom = 4) {
+  const zoom = Math.max(minimumZoom, Math.min(maximumZoom, start.zoom * current.distance / Math.max(1, start.distance)));
+  if (zoom === minimumZoom) return { zoom, panX: 0, panY: 0 };
+  const scale = zoom / start.zoom;
+  return {
+    zoom,
+    panX: current.centerX - current.canvasWidth / 2
+      - scale * (start.centerX - start.canvasWidth / 2 - start.panX),
+    panY: current.centerY - current.canvasHeight / 2
+      - scale * (start.centerY - start.canvasHeight / 2 - start.panY),
+  };
 }
 
 export function encodeHitColor(id) {

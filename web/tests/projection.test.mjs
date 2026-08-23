@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, projectMapPoint } from "../src/projection.js";
+import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, mapProjectionFrame, pinchMapView, projectMapPoint } from "../src/projection.js";
 
 const data = JSON.parse(fs.readFileSync(fileURLToPath(new URL("../data/game-data.json", import.meta.url)), "utf8"));
 
@@ -20,6 +20,27 @@ test("the archived west-positive map is rendered with west on the left", () => {
 
   assert.ok(westernHemisphere[0] < 500, "the Americas should render left of centre");
   assert.ok(easternHemisphere[0] > 500, "Asia should render right of centre");
+});
+
+test("portrait projection keeps the original landscape proportions and centers the board", () => {
+  const frame = mapProjectionFrame(390, 676);
+  assert.equal(frame.width / frame.height, 1.5);
+  assert.equal(frame.y, 208);
+
+  const top = projectMapPoint([90, 0], [90, 180], 390, 676, 0);
+  const bottom = projectMapPoint([-90, 0], [90, 180], 390, 676, 0);
+  assert.equal(top[1], 208);
+  assert.equal(bottom[1], 468);
+  assert.equal(bottom[1] - top[1], 260);
+});
+
+test("two-finger gestures zoom around their moving midpoint", () => {
+  const start = { zoom: 1, panX: 0, panY: 0, distance: 70, centerX: 195, centerY: 338, canvasWidth: 390, canvasHeight: 676 };
+  assert.deepEqual(pinchMapView(start, { ...start, distance: 140 }), { zoom: 2, panX: 0, panY: 0 });
+  assert.deepEqual(pinchMapView(start, { ...start, distance: 350 }), { zoom: 4, panX: 0, panY: 0 });
+
+  const moved = pinchMapView(start, { ...start, distance: 140, centerX: 215, centerY: 348 });
+  assert.deepEqual(moved, { zoom: 2, panX: 20, panY: 10 });
 });
 
 test("country hit IDs survive anti-aliased map edges", () => {
