@@ -13,7 +13,7 @@ The playable build is in [`web`](./web). It includes:
 - recovered yearly country-resource grants, Power Plant doubling, Petroleum discounts, and capital synergy bonuses;
 - country and world upgrades, espionage, nuclear weapons, and Rail Gun;
 - original-style battle zooms, grouped faction outcomes, and browser-decoded marching/combat sounds;
-- three campaign objectives, victory/defeat, campaign log, autosave, and resume;
+- three campaign objectives, victory/defeat, campaign log, autosave, portable save download/upload, native nearby sharing, and resume;
 - an A–Z controlled-country force overview and responsive mouse, touch, and keyboard-accessible interface with settings and save-aware menu exit.
 
 ## Play locally
@@ -38,7 +38,7 @@ GitHub Pages publishes `main`; the root page immediately launches the static gam
 npm test
 ```
 
-The test suite verifies the recovered board geometry and country order, west/east map orientation, capital marker placement, anti-aliased country hit regions, faction setup, country-resource grants and synergy, purchase eligibility, naval boarding, battle reports, orders, upgrades, espionage, turn resolution, saved-game shape, asset references, all 534 normalized PNGs, and the decoded PCM combat audio.
+The test suite verifies the recovered board geometry and country order, west/east map orientation, capital marker placement, anti-aliased country hit regions, faction setup, country-resource grants and synergy, purchase eligibility, naval boarding, battle reports, orders, upgrades, espionage, turn resolution, browser and portable save validation, asset references, all 534 normalized PNGs, and the decoded PCM combat audio.
 
 ## Workspace map
 

@@ -30,6 +30,7 @@
         <nav class="menu-actions" aria-label="Main menu">
           <button id="new-game-button" class="stencil-button">New Game</button>
           <button id="resume-button" class="stencil-button">Resume Game</button>
+          <button id="import-save-button" class="stencil-button minor">Import Save File</button>
           <button id="manual-button" class="stencil-button">Field Manual</button>
           <button id="about-button" class="stencil-button minor">Preservation Notes</button>
         </nav>
@@ -114,10 +115,12 @@
         <p>This is a clean-room, browser-native recreation built from static inspection of the preserved Wargame 1.5.1 IPA. The original ARM executable is not included in or executed by this web app.</p>
         <p>The six faction records, all 91 country records, world geometry, adjacency, starting forces, unit balance, upgrade costs, localization, and artwork were recovered from the archived resources. Apple-specific PNGs were normalized into standard browser PNGs while the source files remain untouched in the preservation folder.</p>
         <p>Original credits: Design &amp; programming — Jérémie Di Prizio and Stéphane Di Prizio. General design &amp; gameplay — Mathieu Di Prizio. Additional artwork &amp; game design — Benoît Leygue.</p>
-        <p>This preservation edition stores campaigns only in your browser. It makes no network requests during play.</p>
+        <p>This preservation edition stores campaigns only in your browser. It makes no network requests during play. Portable JSON saves can be downloaded, validated on import, or handed to the operating system's share sheet for nearby device transfer.</p>
       </article>
     </section>
   </main>
+
+  <input id="save-file-input" class="visually-hidden" type="file" accept=".wargame,.json,.wargame.json,application/json" aria-label="Choose a Wargame save file">
 
   <dialog id="command-dialog" aria-labelledby="dialog-title">
     <div class="dialog-frame">

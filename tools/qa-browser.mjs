@@ -106,7 +106,8 @@ await screenshot("setup.png");
 const setup = await evaluate(`({
   active: document.querySelector('.screen.active')?.id,
   factions: document.querySelectorAll('.faction-option').length,
-  objectives: document.querySelectorAll('#objective-select option').length
+  objectives: document.querySelectorAll('#objective-select option').length,
+  importFromMenu: Boolean(document.querySelector('#import-save-button'))
 })`);
 
 await evaluate("document.querySelector('#setup-form').requestSubmit()");
@@ -119,6 +120,53 @@ const start = await evaluate(`({
   canvas: [document.querySelector('#world-map')?.width, document.querySelector('#world-map')?.height],
   cash: document.querySelector('#status-cash')?.textContent
 })`);
+
+await evaluate("document.querySelector('#save-button').click()");
+await delay(120);
+const saveTransfer = await evaluate(`({
+  title: document.querySelector('#dialog-title').textContent,
+  cards: document.querySelectorAll('.save-transfer-card').length,
+  download: Boolean(document.querySelector('#download-save')),
+  share: Boolean(document.querySelector('#share-save')),
+  upload: Boolean(document.querySelector('#upload-save')),
+  safety: document.querySelector('.save-safety')?.textContent || ''
+})`);
+if (!setup.importFromMenu || saveTransfer.title !== "Save & Transfer" || saveTransfer.cards !== 4 || !saveTransfer.download || !saveTransfer.share || !saveTransfer.upload || !saveTransfer.safety.includes('2 MB')) throw new Error(`Portable save controls failed: ${JSON.stringify(saveTransfer)}.`);
+await screenshot("save-transfer.png");
+const saveDownload = await evaluate(`(() => {
+  const original = HTMLAnchorElement.prototype.click;
+  let download = null;
+  HTMLAnchorElement.prototype.click = function () { download = { name: this.download, blob: this.href.startsWith('blob:') }; };
+  document.querySelector('#download-save').click();
+  HTMLAnchorElement.prototype.click = original;
+  return download;
+})()`);
+if (!saveDownload?.name.endsWith('.wargame.json') || !saveDownload.blob) throw new Error(`Save download failed: ${JSON.stringify(saveDownload)}.`);
+await evaluate(`(() => {
+  const game = JSON.parse(localStorage.getItem('wargame-preservation-save-v1'));
+  const file = new File([JSON.stringify({ format: 'wargame-browser-save', exportVersion: 1, exportedAt: new Date().toISOString(), game })], 'phone-transfer.wargame.json', { type: 'application/json' });
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  const input = document.querySelector('#save-file-input');
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+})()`);
+await delay(250);
+const saveImport = await evaluate(`({
+  title: document.querySelector('#dialog-title').textContent,
+  source: document.querySelector('#dialog-content')?.textContent || '',
+  confirm: Boolean(document.querySelector('#confirm-import')),
+  cancel: Boolean(document.querySelector('#cancel-import'))
+})`);
+if (saveImport.title !== "Load Campaign?" || !saveImport.source.includes('phone-transfer.wargame.json') || !saveImport.confirm || !saveImport.cancel) throw new Error(`Validated save upload failed: ${JSON.stringify(saveImport)}.`);
+await evaluate("document.querySelector('#confirm-import').click()");
+await delay(120);
+const saveImportLoaded = await evaluate(`({
+  active: document.querySelector('.screen.active')?.id,
+  year: document.querySelector('#status-year')?.textContent,
+  localYear: JSON.parse(localStorage.getItem('wargame-preservation-save-v1')).year
+})`);
+if (saveImportLoaded.active !== 'game-screen' || saveImportLoaded.year !== '2010' || saveImportLoaded.localYear !== 2010) throw new Error(`Validated save did not load: ${JSON.stringify(saveImportLoaded)}.`);
 
 const mapTargets = await evaluate(`(async () => {
   const data = await fetch('./data/game-data.json').then((response) => response.json());
@@ -354,6 +402,18 @@ await evaluate("document.querySelector('[data-force-country=\"UNITED_STATES\"]')
 await delay(120);
 const settingsDialog = await evaluate(`({ title: document.querySelector('#dialog-title').textContent, toggles: document.querySelectorAll('.setting-row input').length })`);
 if (settingsDialog.title !== "Settings" || settingsDialog.toggles !== 2) throw new Error(`Settings dialog failed: ${JSON.stringify(settingsDialog)}.`);
+await evaluate("document.querySelector('.dialog-close').click(); document.querySelector('#save-button').click()");
+await delay(120);
+const mobileSave = await evaluate(`(() => {
+  const dialog = document.querySelector('#command-dialog').getBoundingClientRect();
+  const cards = [...document.querySelectorAll('.save-transfer-card')].map((item) => {
+    const rect = item.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  return { title: document.querySelector('#dialog-title').textContent, dialog: { left: dialog.left, right: dialog.right }, cards };
+})()`);
+if (mobileSave.title !== "Save & Transfer" || mobileSave.dialog.left < 0 || mobileSave.dialog.right > mobile.viewport[0] || mobileSave.cards.length !== 4 || mobileSave.cards.some((card) => card.width > mobile.viewport[0] || card.height < 44)) throw new Error(`Mobile save transfer controls failed: ${JSON.stringify(mobileSave)}.`);
+await screenshot("save-transfer-mobile.png");
 await evaluate("document.querySelector('.dialog-close').click(); document.querySelector('#exit-button').click()");
 await delay(120);
 const exitDialog = await evaluate(`({ title: document.querySelector('#dialog-title').textContent, actions: document.querySelectorAll('.exit-actions button').length })`);
@@ -373,7 +433,7 @@ if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[
 }
 await screenshot("dialog-mobile.png");
 
-console.log(JSON.stringify({ setup, start, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, mobileForces, settingsDialog, exitDialog, mobileDialog, runtimeErrors }, null, 2));
+console.log(JSON.stringify({ setup, start, saveTransfer, saveDownload, saveImport, saveImportLoaded, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, mobileForces, settingsDialog, mobileSave, exitDialog, mobileDialog, runtimeErrors }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   if (!edge.killed) edge.kill();

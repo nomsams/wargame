@@ -95,6 +95,12 @@ test("corrupted browser saves are rejected before they can enter the UI", () => 
   const invalidQueue = structuredClone(state);
   invalidQueue.queue.push({ id: "tampered", type: "move", faction: USA, from: "UNITED_STATES", to: "NOWHERE", unitType: "troops", quantity: 1 });
   assert.equal(validateSavedGame(invalidQueue, data), false);
+  const invalidUpgrade = structuredClone(state);
+  invalidUpgrade.countries.UNITED_STATES.upgrades.push(9999);
+  assert.equal(validateSavedGame(invalidUpgrade, data), false);
+  const invalidIntel = structuredClone(state);
+  invalidIntel.intel.push(`${USA}:NOWHERE`);
+  assert.equal(validateSavedGame(invalidIntel, data), false);
 });
 
 test("queued purchases reserve cash and can be cancelled with a refund", () => {

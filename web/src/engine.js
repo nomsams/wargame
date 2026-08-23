@@ -107,11 +107,15 @@ export function validateSavedGame(value, data) {
   if (!Array.isArray(value.queue) || !Array.isArray(value.intel) || !Array.isArray(value.log)) return false;
   const factionNames = new Set(data.factions.map((faction) => faction.factionName));
   const countryNames = new Set(data.countries.map((country) => country.name));
+  const validIntel = new Set([...factionNames].flatMap((factionName) => [...countryNames].map((countryName) => `${factionName}:${countryName}`)));
   const validFactions = data.factions.every((source) => {
     const faction = value.factions?.[source.factionName];
     const unitUpgrades = faction?.unitUpgrades ?? [];
+    const worldUpgrades = faction?.worldUpgrades ?? [];
     return faction && Number.isFinite(faction.cash) && faction.cash >= 0 && typeof faction.defeated === "boolean"
-      && Array.isArray(faction.worldUpgrades) && Array.isArray(unitUpgrades)
+      && Array.isArray(worldUpgrades) && new Set(worldUpgrades).size === worldUpgrades.length
+      && worldUpgrades.every((id) => Number.isSafeInteger(id) && upgradeById(id)?.scope === "world")
+      && Array.isArray(unitUpgrades)
       && unitUpgrades.every((item) => ["sea-carrier", "advanced-battleship"].includes(item)) && unitUpgrades.length <= 1
       && Number.isSafeInteger(faction.nukes) && faction.nukes >= 0
       && Number.isSafeInteger(faction.railGunReady) && Number.isSafeInteger(faction.conquests) && faction.conquests >= 0
@@ -122,6 +126,8 @@ export function validateSavedGame(value, data) {
   const validCountries = data.countries.every((source) => {
     const country = value.countries?.[source.name];
     return country && (country.owner === null || factionNames.has(country.owner)) && Array.isArray(country.upgrades)
+      && new Set(country.upgrades).size === country.upgrades.length
+      && country.upgrades.every((id) => Number.isSafeInteger(id) && upgradeById(id)?.scope === "country")
       && (country.bribedBy === null || factionNames.has(country.bribedBy)) && Number.isSafeInteger(country.nukedUntil)
       && Object.keys(UNIT_TYPES).every((unitType) => Number.isSafeInteger(country.units?.[unitType]) && country.units[unitType] >= 0);
   });
@@ -140,7 +146,8 @@ export function validateSavedGame(value, data) {
       && Number.isFinite(action.cost) && action.cost >= 0;
     return false;
   });
-  return validQueue && value.intel.every((item) => typeof item === "string")
+  return validQueue && new Set(value.queue.map((action) => action.id)).size === value.queue.length
+    && value.intel.every((item) => typeof item === "string" && validIntel.has(item))
     && value.log.every((item) => item && Number.isSafeInteger(item.year) && typeof item.message === "string");
 }
 

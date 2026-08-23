@@ -27,6 +27,7 @@ import {
 } from "./engine.js";
 import { FACTION_META, OBJECTIVES, RESOURCE_IMAGES, RESOURCE_NAMES, SPY_ACTIONS, UNIT_TYPES, upgradeById } from "./config.js";
 import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, projectMapPoint } from "./projection.js";
+import { MAX_SAVE_FILE_BYTES, SaveTransferError, parseSaveText, saveFilename, serializeSave } from "./save-transfer.js";
 
 const SAVE_KEY = "wargame-preservation-save-v1";
 const PREFERENCES_KEY = "wargame-preservation-preferences-v1";
@@ -165,6 +166,91 @@ function readSave() {
 
 function autosave() {
   if (gameState) localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+}
+
+function campaignFile() {
+  const exportedAt = new Date();
+  return new File([serializeSave(gameState, exportedAt)], saveFilename(gameState, exportedAt), { type: "application/json" });
+}
+
+function downloadCampaign(file = campaignFile()) {
+  const url = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  notify(`Downloaded ${file.name}.`, "good");
+}
+
+function canShareCampaignFile(file) {
+  try {
+    return typeof navigator.share === "function" && (typeof navigator.canShare !== "function" || navigator.canShare({ files: [file] }));
+  } catch {
+    return false;
+  }
+}
+
+async function shareCampaign(file = campaignFile()) {
+  if (!canShareCampaignFile(file)) {
+    downloadCampaign(file);
+    notify("Nearby sharing is unavailable here, so the save was downloaded instead.", "good");
+    return;
+  }
+  try {
+    await navigator.share({ title: "Wargame campaign", text: `Wargame campaign — year ${gameState.year}`, files: [file] });
+    notify("Save handed to your device's share sheet.", "good");
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      downloadCampaign(file);
+      notify("Sharing failed, so the save was downloaded instead.", "bad");
+    }
+  }
+}
+
+function openSaveManager() {
+  autosave();
+  sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
+  const file = campaignFile();
+  const shareAvailable = canShareCampaignFile(file);
+  openDialog("Campaign portability", "Save & Transfer", `<p class="section-help">Keep a portable copy, import it on another browser, or send it directly with your device's share sheet. AirDrop, Quick Share, and Nearby Share transfer device-to-device when your platform offers them.</p><div class="save-transfer-grid"><button id="save-local" class="save-transfer-card" type="button"><strong>Save in browser</strong><span>Update this device's local campaign.</span></button><button id="download-save" class="save-transfer-card" type="button"><strong>Download save file</strong><span>Store a portable, human-readable JSON copy.</span></button><button id="share-save" class="save-transfer-card" type="button"><strong>Share to phone</strong><span>${shareAvailable ? "Open the system share sheet for nearby transfer." : "Download a file to send with your preferred nearby-transfer app."}</span></button><button id="upload-save" class="save-transfer-card" type="button"><strong>Upload save file</strong><span>Continue a campaign received from another device.</span></button></div><p class="save-safety">Imports are limited to 2 MB and must pass the complete game-state validator. Save files contain data only—no scripts or executable code.</p>`, (root) => {
+    $("#save-local", root).addEventListener("click", () => notify("Campaign saved in this browser.", "good"));
+    $("#download-save", root).addEventListener("click", () => downloadCampaign(file));
+    $("#share-save", root).addEventListener("click", () => shareCampaign(file));
+    $("#upload-save", root).addEventListener("click", () => $("#save-file-input").click());
+  });
+}
+
+function openImportReview(importedGame, sourceName) {
+  const faction = FACTION_META[importedGame.playerFaction]?.short || importedGame.playerFaction;
+  const owned = Object.values(importedGame.countries).filter((country) => country.owner === importedGame.playerFaction).length;
+  openDialog("Validated save file", "Load Campaign?", `<p><strong>${escapeHtml(faction)}</strong> · Year ${importedGame.year} · ${owned} countries</p><p class="section-help">Source: ${escapeHtml(sourceName)}. Loading it replaces this browser's local save. Download the current campaign first if you want a separate backup.</p><div class="dialog-actions import-actions"><button id="confirm-import" class="primary-button" type="button">Load imported campaign</button><button id="cancel-import" class="secondary-button" type="button">Cancel</button></div>`, (root) => {
+    $("#confirm-import", root).addEventListener("click", () => {
+      gameState = importedGame;
+      selectedCountry = gameData.factions.find((factionEntry) => factionEntry.factionName === gameState.playerFaction)?.capitalCountry || null;
+      localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+      sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
+      closeDialog();
+      showScreen("game-screen");
+      notify(`Loaded ${sourceName}.`, "good");
+    });
+    $("#cancel-import", root).addEventListener("click", closeDialog);
+  });
+}
+
+async function importCampaignFile(file) {
+  if (!file) return;
+  try {
+    if (file.size > MAX_SAVE_FILE_BYTES) throw new SaveTransferError("That save is larger than the 2 MB safety limit.");
+    const importedGame = parseSaveText(await file.text(), gameData);
+    openImportReview(importedGame, file.name);
+  } catch (error) {
+    notify(error instanceof SaveTransferError ? error.message : "The save file could not be loaded.", "bad");
+  } finally {
+    $("#save-file-input").value = "";
+  }
 }
 
 function updateResumeButton() {
@@ -833,7 +919,7 @@ function buildManual() {
     <h3>3. Economy, resources, and buying</h3><p>Every controlled country pays cash each year and supplies its recovered national-resource bonus: Heavy Industry produces planes, Finance produces cash, Agriculture troops, Ore missiles, and Fishing ships. Petroleum discounts ships, planes, and missiles. A Power Plant doubles the local resource effect, and controlling more than nine countries with the same resource grants its synergy bonus at your capital. Units may be bought in original faction countries or anywhere with a Supply Center.</p>
     <h3>4. Combat</h3><p>Each faction has the original unit attack, defence, and cost profile recovered from the app. Generals, country defences, bribery, and upgrades modify combat. Battles involving your faction zoom to the contested country and replay with the preserved marching and combat sounds. Use Show result or Skip all to shorten the sequence.</p>
     <h3>5. Upgrades and spying</h3><p>Country upgrades include AWFDS, Supply Centers, Power Plants, and a faction-specific ability. World upgrades unlock decisive faction powers. Intelligence reveals a hidden garrison; Bribery halves its defence for the current year; 00 Agents unlock hits against rival generals.</p>
-    <h3>6. General, forces, end turn, and saves</h3><p>The General view lists every controlled-country garrison A–Z, including troops, ships, planes, missiles, and commandos. End Turn lets all computer factions plan, then resolves purchases, construction, moves, resource grants, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order and can also be saved from the toolbar.</p>`;
+    <h3>6. General, forces, end turn, and saves</h3><p>The General view lists every controlled-country garrison A–Z, including troops, ships, planes, missiles, and commandos. End Turn lets all computer factions plan, then resolves purchases, construction, moves, resource grants, and battles. Income is collected and neutral armies grow. Campaigns autosave locally after every order. The Save toolbar opens browser save, download, validated upload, and phone-sharing controls. Native sharing can use AirDrop, Quick Share, or Nearby Share where the device supports it; download is the universal fallback.</p>`;
 }
 
 function checkEnding() {
@@ -849,6 +935,8 @@ function checkEnding() {
 function bindEvents() {
   $("#new-game-button").addEventListener("click", () => showScreen("setup-screen"));
   $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { sessionSaveBaseline = localStorage.getItem(SAVE_KEY); gameState = saved; selectedCountry = gameData.factions.find((faction) => faction.factionName === gameState.playerFaction)?.capitalCountry; showScreen("game-screen"); } });
+  $("#import-save-button").addEventListener("click", () => $("#save-file-input").click());
+  $("#save-file-input").addEventListener("change", (event) => importCampaignFile(event.target.files[0]));
   $("#manual-button").addEventListener("click", () => showScreen("manual-screen"));
   $("#about-button").addEventListener("click", () => showScreen("about-screen"));
   $$('[data-screen]').forEach((button) => button.addEventListener("click", () => showScreen(button.dataset.screen)));
@@ -859,7 +947,7 @@ function bindEvents() {
   $("#world-upgrades-button").addEventListener("click", openWorldUpgrades);
   $("#espionage-button").addEventListener("click", () => openSpyDialog(selectedCountry));
   $("#objective-button").addEventListener("click", openObjective);
-  $("#save-button").addEventListener("click", () => { autosave(); sessionSaveBaseline = localStorage.getItem(SAVE_KEY); notify("Campaign saved in this browser.", "good"); });
+  $("#save-button").addEventListener("click", openSaveManager);
   $("#settings-button").addEventListener("click", openSettings);
   $("#exit-button").addEventListener("click", openExitPrompt);
   $("#end-turn-button").addEventListener("click", async () => {

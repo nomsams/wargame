@@ -23,7 +23,7 @@ The archived app was treated as untrusted input.
 4. The ARM Mach-O executable was examined only with string extraction, structure parsing, symbol-table reading, and Capstone static disassembly.
 5. The browser app does not contain, load, emulate, or execute the Mach-O binary, NIB files, entitlements, torrent, SQLite metadata, or arbitrary archive content.
 6. Only decoded JSON, normalized PNG copies, and six explicitly selected audio effects cross into `web/`. Browser paths are fixed; no path or HTML input is accepted from archive data at runtime.
-7. Campaigns remain in browser `localStorage`. The playable app makes no network requests after its static files are loaded.
+7. Campaigns remain in browser `localStorage` unless the player explicitly downloads, uploads, or shares a portable JSON save. Imports are capped at 2 MB and pass the same complete state validator as browser saves. The app makes no network requests after its static files are loaded; native sharing hands the file to the operating system and does not expose it to the website.
 
 ## Recovered material
 
@@ -59,7 +59,7 @@ Some high-level behavior could not be recovered perfectly without executing the 
 - the AI uses the recovered map and balance data with deterministic heuristics;
 - archived `ResourceManager` methods were statically disassembled to restore Heavy Industry planes, Finance cash, Agriculture troops, Ore missiles, Fishing ships, Petroleum unit discounts, Power Plant doubling, and ten-country capital synergy awards;
 - queued ships carry one troop each, or two with the recovered Sea Carrier unit choice, matching the original localization and tutorial instructions;
-- network/Bluetooth/Ladder services are intentionally not contacted or emulated;
+- the obsolete network/Bluetooth/Ladder services are intentionally not contacted or emulated; portable device handoff uses a user-invoked operating-system share sheet (including AirDrop, Quick Share, or Nearby Share where available) with file download as the fallback;
 - selected battle CAF effects are converted ahead of time to browser-native PCM; the original CAF files remain only in the excluded archive.
 
 These choices are isolated in `web/src/engine.js` and can be refined as more historical evidence appears. The recovered raw data remains separate from game logic so later researchers can replace interpretations without repeating extraction.

@@ -159,6 +159,12 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
 .transport-action { grid-column: 1 / -1; border-color: #477b91 !important; background: linear-gradient(#20536b, #122f43) !important; }
 .transport-action span { display: inline-grid; min-width: 20px; height: 20px; margin-left: 5px; place-content: center; border-radius: 10px; background: #e99b12; color: #12100b; font-size: .7rem; }
 .settings-form { display: grid; gap: 10px; }
+.save-transfer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.save-transfer-card { min-height: 104px; display: grid; align-content: center; gap: 6px; border: 1px solid #49627c; border-radius: 4px; background: linear-gradient(145deg, rgba(39,61,85,.9), rgba(14,25,39,.94)); padding: 15px; color: white; text-align: left; }
+.save-transfer-card:hover, .save-transfer-card:focus-visible { border-color: var(--orange); background: linear-gradient(145deg, rgba(62,79,96,.94), rgba(23,35,49,.96)); }
+.save-transfer-card strong { font-size: .92rem; }
+.save-transfer-card span { color: var(--muted); font-size: .72rem; line-height: 1.4; }
+.save-safety { margin: 14px 0 0; padding: 10px 12px; border-left: 3px solid #5b9bd5; background: rgba(91,155,213,.08); color: #b7c7d2; font-size: .75rem; line-height: 1.45; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 12px 14px; border: 1px solid var(--line); background: rgba(255,255,255,.025); text-transform: none; }
 .setting-row strong, .setting-row small { display: block; }
 .setting-row strong { color: white; font-size: .92rem; letter-spacing: 0; }
@@ -238,6 +244,8 @@ dialog::backdrop { background: rgba(1,4,8,.75); backdrop-filter: blur(4px); }
   .dialog-frame h2 { font-size: 1.22rem; }
   .dialog-content { max-height: calc(100vh - 82px - env(safe-area-inset-top, 0px)); padding: 16px 16px max(18px, env(safe-area-inset-bottom, 0px)); }
   .dialog-grid { grid-template-columns: 1fr; }
+  .save-transfer-grid { grid-template-columns: 1fr; }
+  .save-transfer-card { min-height: 82px; }
   .dialog-form .primary-button { width: 100%; min-height: 50px; justify-self: stretch; }
   .dialog-actions { display: grid; grid-template-columns: 1fr; }
   .dialog-actions button { width: 100%; min-height: 48px; }
