@@ -1,4 +1,5 @@
-import { validateSavedGame } from "./engine.js";
+import { migrateSavedGame, validateSavedGame } from "./engine.js";
+import { scenarioData } from "./scenario.js";
 
 export const SAVE_EXPORT_FORMAT = "wargame-browser-save";
 export const SAVE_EXPORT_VERSION = 1;
@@ -49,6 +50,7 @@ export function parseSaveText(text, data) {
     game = parsed.game;
   }
 
-  if (!validateSavedGame(game, data)) throw new SaveTransferError("That file is incomplete, corrupted, or not a compatible Wargame save.");
+  game = migrateSavedGame(game);
+  if (!validateSavedGame(game, scenarioData(data, game?.scenario))) throw new SaveTransferError("That file is incomplete, corrupted, or not a compatible Wargame save.");
   return game;
 }

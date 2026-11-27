@@ -30,9 +30,15 @@ export function projectMapPoint(vertex, halfSize, width, height, padding = 18) {
   ];
 }
 
-export function pinchMapView(start, current, minimumZoom = 1, maximumZoom = 4) {
-  const zoom = Math.max(minimumZoom, Math.min(maximumZoom, start.zoom * current.distance / Math.max(1, start.distance)));
-  if (zoom === minimumZoom) return { zoom, panX: 0, panY: 0 };
+export const MAX_MAP_ZOOM = 24;
+
+export function clampMapZoom(value) {
+  return Math.max(1, Math.min(MAX_MAP_ZOOM, value));
+}
+
+export function pinchMapView(start, current) {
+  const zoom = clampMapZoom(start.zoom * current.distance / Math.max(1, start.distance));
+  if (zoom === 1) return { zoom, panX: 0, panY: 0 };
   const scale = zoom / start.zoom;
   return {
     zoom,
@@ -51,4 +57,14 @@ export function decodeHitColor(pixel) {
   const coverage = pixel[1];
   if (!coverage) return 0;
   return Math.round(pixel[0] * 255 / coverage);
+}
+
+// Map a pointer position onto the hit canvas. The backing store is sized with
+// Math.round in resizeMap, so the pick must scale by the real ratio rather than
+// recompute devicePixelRatio, and it must clamp: getImageData throws when asked
+// for a pixel outside the canvas, which a click on the far edge can produce.
+export function hitTestPixel(offset, cssSize, canvasSize) {
+  if (!(cssSize > 0) || !(canvasSize > 0)) return -1;
+  const value = Math.floor((offset / cssSize) * canvasSize);
+  return Math.max(0, Math.min(canvasSize - 1, value));
 }

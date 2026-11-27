@@ -3,31 +3,31 @@ import {
   availableUnitCount,
   availableBoardingCapacity,
   availableUpgrades,
-  boardTroops,
-  buyWorldUpgrade,
   canBuyIn,
   canReach,
-  cancelAction,
   checkVictory,
-  chooseNavalDoctrine,
+  awardedMedals,
+  availableUnitUpgrades,
   countryResourceBonus,
   displayCountry,
   endTurn,
   maxPurchasableUnits,
+  migrateSavedGame,
   navalTransportMultiplier,
   newGame,
   publicCountryView,
-  queueBuy,
-  queueMove,
-  queueUpgrade,
   unitCost,
-  useSpyAction,
-  useStrategicWeapon,
   validateSavedGame,
 } from "./engine.js";
-import { FACTION_META, OBJECTIVES, RESOURCE_IMAGES, RESOURCE_NAMES, SPY_ACTIONS, UNIT_TYPES, upgradeById } from "./config.js";
-import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, mapProjectionFrame, pinchMapView, projectMapPoint } from "./projection.js";
+import { DIFFICULTIES, FACTION_META, MEDALS, OBJECTIVES, RESOURCE_IMAGES, RESOURCE_NAMES, SPY_ACTIONS, UNIT_TYPES, unitUpgradeBranch, unitUpgradeById, upgradeById } from "./config.js";
+import { CAPITAL_MARKER_OVERRIDES, clampMapZoom, decodeHitColor, encodeHitColor, hitTestPixel, mapProjectionFrame, pinchMapView, projectMapPoint } from "./projection.js";
 import { MAX_SAVE_FILE_BYTES, SaveTransferError, parseSaveText, saveFilename, serializeSave } from "./save-transfer.js";
+import { runOrder } from "./match.js";
+import { createMatchSave, guestSaveForHello, playMatch, readMatchSave } from "./match-session.js";
+import { allianceBetween, forceInCountry, friendlyFaction, isSupplied } from "./diplomacy.js";
+import { REGIONAL_SCENARIO, scenarioData } from "./scenario.js";
+import { openLobby } from "./lobby.js";
+import { parseSignalCode } from "./peer.js";
 
 const SAVE_KEY = "wargame-preservation-save-v1";
 const PREFERENCES_KEY = "wargame-preservation-preferences-v1";
@@ -36,6 +36,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const asset = (name) => `./assets/${name}`;
 
 let gameData;
+let boardData;
 let localization;
 let gameState = null;
 let selectedCountry = null;
@@ -47,6 +48,13 @@ let battleSkipCurrent = false;
 let battleSkipAll = false;
 let currentBattleAudio = null;
 let preferences = readPreferences();
+let multiplayer = null;
+let replay = null;
+let draftRoute = null;
+const routeStyles = {
+  troops: ["#ffcb55", []], ships: ["#58dcff", [8, 4]], planes: ["#f6f6ff", [3, 4]],
+  missiles: ["#ff766e", [8, 3, 2, 3]], commandos: ["#d5a4ff", [2, 4]],
+};
 
 const canvas = $("#world-map");
 const context = canvas.getContext("2d", { alpha: false });
@@ -134,7 +142,12 @@ function showScreen(id) {
   $$(".screen").forEach((screen) => screen.classList.toggle("active", screen.id === id));
   window.scrollTo(0, 0);
   if (id === "menu-screen") updateResumeButton();
-  if (id === "game-screen") requestAnimationFrame(() => { resizeMap(); renderAll(); });
+  if (id === "game-screen") requestAnimationFrame(() => {
+    if (!gameState || !$("#game-screen").classList.contains("active")) return;
+    resizeMap();
+    renderAll();
+    checkEnding();
+  });
 }
 
 function notify(message, kind = "info") {
@@ -161,19 +174,68 @@ function withRules(action) {
   }
 }
 
+function submitOrder(type, args, onApplied = null) {
+  return withRules(() => {
+    const result = multiplayer ? multiplayer.order(type, args) : runOrder(gameData, gameState, type, args);
+    if (multiplayer) gameState = multiplayer.state;
+    onApplied?.(result);
+  });
+}
+
+function openMultiplayer(invite = null, resumeOnly = false) {
+  const savedHost = multiplayer?.seat === 1 ? null : readMatchSave(boardData, 0);
+  let activeSession;
+  openLobby({
+    openDialog, invite, saved: savedHost, resumeOnly, regionalScenario: REGIONAL_SCENARIO,
+    factionsForScenario: (scenario) => scenarioData(boardData, scenario).factions.map(({ factionName }) =>
+      ({ id: escapeHtml(factionName), label: escapeHtml(FACTION_META[factionName].short) })),
+    onMatch(peer, seat, input) {
+      const { save, key } = seat === 0
+        ? { save: input.savedMatch || createMatchSave(boardData, input), key: null }
+        : guestSaveForHello(boardData, input, readMatchSave(boardData, 1));
+      const session = playMatch(boardData, save, seat, peer, (resolved) => {
+        if (multiplayer !== session) return;
+        gameState = session.state;
+        if (resolved) {
+          closeReplay();
+          closeDialog();
+          notify(`Both orders resolved. Year ${gameState.year} begins.`, "good");
+        }
+        renderAll();
+        checkEnding();
+      });
+      activeSession = multiplayer = session;
+      gameData = session.data;
+      gameState = session.state;
+      selectedCountry = initialCountrySelection(gameState.playerFaction);
+      Object.assign(mapView, { zoom: 1, panX: 0, panY: 0 });
+      showScreen("game-screen");
+      session.start(key);
+    },
+    async onMessage(command) {
+      if (activeSession && multiplayer === activeSession) await activeSession.receive(command);
+    },
+    onDisconnect(reason) {
+      if (multiplayer !== activeSession) return;
+      notify(reason, "bad");
+      renderStatus();
+    },
+  });
+}
+
 function readSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return validateSavedGame(parsed, gameData) ? parsed : null;
+    const parsed = migrateSavedGame(JSON.parse(raw));
+    return validateSavedGame(parsed, scenarioData(boardData, parsed?.scenario)) ? parsed : null;
   } catch {
     return null;
   }
 }
 
 function autosave() {
-  if (gameState) localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+  if (gameState && !multiplayer) localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
 }
 
 function campaignFile() {
@@ -219,6 +281,13 @@ async function shareCampaign(file = campaignFile()) {
 }
 
 function openSaveManager() {
+  if (multiplayer) {
+    const connected = multiplayer.connected;
+    openDialog("Multiplayer", "Match Save", `<p>Your latest rounds and private draft are saved in this browser.</p><p class="section-help">If the connection drops, the host creates a fresh invite from their saved match. The guest opens it in the browser that played the match.</p>${!connected ? '<button id="reconnect-match" class="primary-button" type="button">Reconnect</button>' : ""}`, (root) => {
+      $("#reconnect-match", root)?.addEventListener("click", () => openMultiplayer(null, true));
+    });
+    return;
+  }
   autosave();
   sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
   const file = campaignFile();
@@ -237,6 +306,7 @@ function openImportReview(importedGame, sourceName) {
   openDialog("Validated save file", "Load Campaign?", `<p><strong>${escapeHtml(faction)}</strong> · Year ${importedGame.year} · ${owned} countries</p><p class="section-help">Source: ${escapeHtml(sourceName)}. Loading it replaces this browser's local save. Download the current campaign first if you want a separate backup.</p><div class="dialog-actions import-actions"><button id="confirm-import" class="primary-button" type="button">Load imported campaign</button><button id="cancel-import" class="secondary-button" type="button">Cancel</button></div>`, (root) => {
     $("#confirm-import", root).addEventListener("click", () => {
       gameState = importedGame;
+      gameData = scenarioData(boardData, gameState.scenario);
       selectedCountry = initialCountrySelection(gameState.playerFaction);
       localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
       sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
@@ -252,7 +322,7 @@ async function importCampaignFile(file) {
   if (!file) return;
   try {
     if (file.size > MAX_SAVE_FILE_BYTES) throw new SaveTransferError("That save is larger than the 2 MB safety limit.");
-    const importedGame = parseSaveText(await file.text(), gameData);
+    const importedGame = parseSaveText(await file.text(), boardData);
     openImportReview(importedGame, file.name);
   } catch (error) {
     notify(error instanceof SaveTransferError ? error.message : "The save file could not be loaded.", "bad");
@@ -265,38 +335,54 @@ function updateResumeButton() {
   $("#resume-button").disabled = !readSave();
 }
 
-function buildSetup() {
+function factionMark(meta) {
+  return meta.flag ? `<img src="${asset(meta.flag)}" alt="">` : `<span class="faction-monogram" style="--faction-accent:${meta.accent}">${meta.code}</span>`;
+}
+
+function buildFactionOptions() {
   const grid = $("#faction-grid");
+  const data = scenarioData(boardData, $("#campaign-scenario").value);
+  if (!data.factions.some(({ factionName }) => factionName === selectedFaction)) selectedFaction = data.factions[0].factionName;
   grid.innerHTML = "";
-  for (const faction of gameData.factions) {
+  for (const faction of data.factions) {
     const meta = FACTION_META[faction.factionName];
-    const starting = gameData.countries.filter((country) => country.faction === faction.factionName).map((country) => countryLabel(country.name)).join(" · ");
+    const starting = data.countries.filter((country) => country.faction === faction.factionName).map((country) => countryLabel(country.name)).join(" · ");
     const button = document.createElement("button");
     button.type = "button";
     button.className = "faction-option";
     button.setAttribute("role", "radio");
-    button.setAttribute("aria-checked", String(!selectedFaction));
+    button.setAttribute("aria-checked", String(faction.factionName === selectedFaction));
     button.style.setProperty("--faction", meta.color);
     button.style.setProperty("--accent", meta.accent);
-    button.innerHTML = `<img src="${asset(meta.flag)}" alt=""><span><strong>${escapeHtml(meta.short)}</strong><small>${escapeHtml(starting)}</small></span>`;
+    button.innerHTML = `${factionMark(meta)}<span><strong>${escapeHtml(meta.short)}</strong><small>${escapeHtml(starting)}</small></span>`;
     button.addEventListener("click", () => {
       selectedFaction = faction.factionName;
       $$(".faction-option", grid).forEach((item) => item.setAttribute("aria-checked", String(item === button)));
     });
     grid.append(button);
-    if (!selectedFaction) selectedFaction = faction.factionName;
   }
+}
+
+function buildSetup() {
+  buildFactionOptions();
   const objectives = $("#objective-select");
   objectives.innerHTML = Object.entries(OBJECTIVES).map(([id, item]) => `<option value="${id}">${escapeHtml(item.title)}</option>`).join("");
+  // The original named each difficulty level after an army rank.
+  $("#difficulty-select").innerHTML = DIFFICULTIES.map((item) =>
+    `<option value="${item.id}" ${item.id === "normal" ? "selected" : ""}>${escapeHtml(item.title)} · ${escapeHtml(item.rank)}</option>`).join("");
 }
 
 function startCampaign() {
   sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
+  const scenario = $("#campaign-scenario").value;
+  gameData = scenarioData(boardData, scenario);
   gameState = newGame(gameData, {
     playerFaction: selectedFaction,
     heroName: $("#hero-name").value.trim() || "General",
     objective: $("#objective-select").value,
     difficulty: $("#difficulty-select").value,
+    scenario,
+    alliances: $("#campaign-alliances").checked,
   });
   selectedCountry = initialCountrySelection(selectedFaction);
   autosave();
@@ -353,6 +439,8 @@ function countryColor(name, index) {
   }
   if (country.nukedUntil > gameState.year) return "#050505";
   if (battleColorOverride?.country === name) return battleColorOverride.owner ? FACTION_META[battleColorOverride.owner].color : "#161d27";
+  const event = replay?.events[replay.index];
+  if (event?.country === name && event.type === "battle") return event.winner ? FACTION_META[event.winner].color : "#161d27";
   return country.owner ? FACTION_META[country.owner].color : "#161d27";
 }
 
@@ -407,6 +495,7 @@ function drawMap() {
     context.stroke();
   });
 
+  drawRoutes(width, height);
   if (gameState) {
     context.font = `${10 / mapView.zoom}px Segoe UI`;
     context.textAlign = "center";
@@ -424,11 +513,61 @@ function drawMap() {
   hitContext.setTransform(1, 0, 0, 1, 0, 0);
 }
 
+function drawRoutes(width, height) {
+  if (!gameState) return;
+  const current = gameState.playerFaction;
+  const event = replay?.events[replay.index];
+  const routes = event ? [{ from: event.from, to: event.country, unitType: event.unitType }]
+    : gameState.queue.filter((order) => order.type === "move" && order.faction === current);
+  if (draftRoute && !event) routes.push(draftRoute);
+  const incoming = routes.some(({ to }) => to === selectedCountry);
+  context.save();
+  for (const route of routes) {
+    const origin = gameData.map.countries.find(({ name }) => name === route.from);
+    const destination = gameData.map.countries.find(({ name }) => name === route.to);
+    const style = routeStyles[route.unitType];
+    if (!origin || !destination || !style) continue;
+    const [x, y] = pointOnMap(origin.center, width, height);
+    const [endX, endY] = pointOnMap(destination.center, width, height);
+    const length = Math.hypot(endX - x, endY - y);
+    if (!length) continue;
+    const scale = mapView.zoom;
+    const dx = (endX - x) / length, dy = (endY - y) / length;
+    const bend = Math.min(28, length * .15);
+    const midX = (x + endX) / 2 - dy * bend, midY = (y + endY) / 2 + dx * bend;
+    context.globalAlpha = event || route === draftRoute || route.to === selectedCountry ? .93 : incoming ? .2 : .65;
+    context.strokeStyle = context.fillStyle = style[0];
+    context.lineWidth = (route.to === selectedCountry ? 2.7 : 1.8) / scale;
+    context.setLineDash(style[1].map((step) => step / scale));
+    context.beginPath();
+    context.moveTo(x, y);
+    context.quadraticCurveTo(midX, midY, endX, endY);
+    context.stroke();
+    const angle = Math.atan2(endY - midY, endX - midX);
+    const arrow = Math.min(9 / scale, length * .55);
+    context.beginPath();
+    context.moveTo(endX, endY);
+    context.lineTo(endX - Math.cos(angle - .5) * arrow, endY - Math.sin(angle - .5) * arrow);
+    context.lineTo(endX - Math.cos(angle + .5) * arrow, endY - Math.sin(angle + .5) * arrow);
+    context.fill();
+  }
+  context.restore();
+}
+
+function previewRoute(from, to, unitType) {
+  draftRoute = from && to && unitType ? { from, to, unitType } : null;
+  drawMap();
+}
+
 function pickCountry(event) {
   const rect = canvas.getBoundingClientRect();
-  const ratio = Math.min(2, window.devicePixelRatio || 1);
-  const x = Math.floor((event.clientX - rect.left) * ratio);
-  const y = Math.floor((event.clientY - rect.top) * ratio);
+  // hitTestPixel scales by the real backing-store size rather than recomputing
+  // the device ratio, so the rounding in resizeMap cannot drift from the pick,
+  // and it clamps: a click on or just past the right or bottom edge would
+  // otherwise index outside the canvas and make getImageData throw.
+  const x = hitTestPixel(event.clientX - rect.left, rect.width, hitCanvas.width);
+  const y = hitTestPixel(event.clientY - rect.top, rect.height, hitCanvas.height);
+  if (x < 0 || y < 0) return;
   const pixel = hitContext.getImageData(x, y, 1, 1).data;
   // The complementary channels let us recover the ID after vector
   // anti-aliasing blends a narrow country triangle with the black backdrop.
@@ -459,20 +598,31 @@ function renderCountryPanel() {
   const resource = RESOURCE_NAMES[source.countryResource] || "Unknown";
   const upgradePills = view.upgrades?.length ? view.upgrades.map((id) => `<span>${escapeHtml(upgradeById(id)?.short || upgradeById(id)?.title || `Upgrade ${id}`)}</span>`).join("") : `<span>None built</span>`;
   const own = country.owner === gameState.playerFaction;
-  const hostile = country.owner && !own;
-  const attackable = !own && country.nukedUntil <= gameState.year;
+  const friendly = friendlyFaction(gameState, gameState.playerFaction, country.owner);
+  const localForce = forceInCountry(country, gameState.playerFaction);
+  const hostile = country.owner && !friendly;
+  const attackable = !friendly && country.nukedUntil <= gameState.year;
   const canPurchaseHere = own && canBuyIn(gameData, gameState, gameState.playerFaction, selectedCountry);
-  const boardableShips = own ? gameState.queue.filter((action) => action.type === "move" && action.unitType === "ships"
+  const boardableShips = localForce ? gameState.queue.filter((action) => action.type === "move" && action.unitType === "ships"
     && action.faction === gameState.playerFaction && action.from === selectedCountry && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0) : [];
+  const incoming = gameState.queue.filter((order) => order.type === "move" && order.faction === gameState.playerFaction && order.to === selectedCountry);
   panel.style.setProperty("--owner", ownerMeta.color);
   panel.style.setProperty("--accent", ownerMeta.accent);
   panel.innerHTML = `
     <div class="country-head"><button id="close-country" class="country-close" aria-label="Close country panel">×</button><span class="country-owner">${escapeHtml(ownerMeta.short)}</span><h2 class="country-name">${escapeHtml(countryLabel(selectedCountry))}</h2><div class="country-resource"><img src="${asset(RESOURCE_IMAGES[source.countryResource])}" alt=""><span>${escapeHtml(resource)} · $${source.cashPerTurn}/year<small>Yearly resource bonus: ${escapeHtml(resourceBonusText(selectedCountry, Boolean(view.upgrades)))}</small></span></div></div>
     <div class="country-actions">
-      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action" ${canPurchaseHere ? "" : "disabled title=\"Build a Supply Center to buy units here\""}>Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}` : ""}
+      ${own ? `<button id="move-action">Move / Attack</button><button id="buy-action" ${canPurchaseHere ? "" : "disabled title=\"Build a Supply Center to buy units here\""}>Buy Units</button><button id="country-upgrade-action">Upgrades</button><button id="country-info-action">Country Info</button>` : ""}
+      ${boardableShips.length ? `<button id="board-action" class="transport-action">Board Troops <span>${boardableShips.length}</span></button>` : ""}
       ${hostile ? `<button id="spy-country-action">Spy</button>` : ""}${attackable ? `<button id="attack-country-action" class="attack">Attack Country</button>` : ""}
+      ${!own && localForce ? '<button id="move-action">Move visiting forces</button>' : ""}
+      ${gameState.diplomacy?.alliances.some(({ members }) => members.includes(gameState.playerFaction)) ? '<button id="support-action">Ask for support</button>' : ""}
     </div>
+    ${incoming.length ? `<section class="panel-section"><h3>Incoming orders</h3><ul class="incoming-orders">${incoming.map((order) =>
+      `<li style="--route-color:${routeStyles[order.unitType][0]}">${order.quantity} ${UNIT_TYPES[order.unitType].label.toLowerCase()} from ${escapeHtml(countryLabel(order.from))}${order.carriedTroops ? ` (+${order.carriedTroops} troops aboard)` : ""}</li>`).join("")}</ul></section>` : ""}
     <section class="panel-section"><h3>Garrison</h3>${unitsMarkup(view)}</section>
+    ${friendly && Object.entries(country.visitors || {}).some(([, units]) => Object.values(units).some(Boolean))
+      ? `<section class="panel-section"><h3>Allied visitors</h3>${Object.entries(country.visitors).filter(([, units]) => Object.values(units).some(Boolean)).map(([name, units]) => `<p>${escapeHtml(FACTION_META[name].short)}</p>${unitsMarkup({ units })}`).join("")}</section>` : ""}
+    ${own && gameState.diplomacy ? `<section class="panel-section"><h3>Supply line</h3><p>${isSupplied(gameData, gameState, gameState.playerFaction, selectedCountry) ? "Connected to an allied headquarters." : "Isolated or blockaded · unit prices +20%"}</p></section>` : ""}
     <section class="panel-section"><h3>Infrastructure</h3>${view.upgrades ? `<div class="upgrade-pills">${upgradePills}</div>` : `<div class="redacted">Infrastructure classified</div>`}</section>
     <section class="panel-section"><h3>Strategic data</h3><div class="upgrade-pills"><span>${escapeHtml(source.hasSeaBorder ? "Sea border" : "Landlocked")}</span><span>${source.adjoiningCountries.length} borders</span>${country.nukedUntil > gameState.year ? `<span>Uninhabitable until ${country.nukedUntil}</span>` : ""}</div></section>`;
   $("#move-action")?.addEventListener("click", () => openMoveDialog(selectedCountry));
@@ -483,19 +633,38 @@ function renderCountryPanel() {
   $("#board-action")?.addEventListener("click", () => openBoardTroopsDialog(boardableShips));
   $("#spy-country-action")?.addEventListener("click", () => openSpyDialog(selectedCountry));
   $("#attack-country-action")?.addEventListener("click", () => openAttackTargetDialog(selectedCountry));
+  $("#support-action")?.addEventListener("click", () => openDiplomacy(selectedCountry));
 }
 
 function renderStatus() {
   if (!gameState) return;
   const factionName = gameState.playerFaction;
   const meta = FACTION_META[factionName];
-  $("#status-flag").src = asset(meta.flag);
+  $("#status-flag").hidden = !meta.flag;
+  if (meta.flag) $("#status-flag").src = asset(meta.flag);
+  $("#status-monogram").hidden = Boolean(meta.flag);
+  $("#status-monogram").textContent = meta.code;
   $("#status-faction").textContent = meta.short;
   $("#status-general").textContent = `${gameState.factions[factionName].general.name} · Rank ${gameState.factions[factionName].general.level}`;
   $("#status-year").textContent = gameState.year;
   $("#status-countries").textContent = Object.values(gameState.countries).filter((country) => country.owner === factionName).length;
   $("#status-cash").textContent = `$${gameState.factions[factionName].cash.toLocaleString()}`;
   $("#queue-count").textContent = gameState.queue.filter((action) => action.faction === factionName).length;
+  const turnButton = $("#end-turn-button");
+  const turnLabel = $("span", turnButton);
+  const turnDetail = $("small", turnButton);
+  if (multiplayer) {
+    const connected = multiplayer.connected;
+    turnButton.disabled = !connected || multiplayer.locked || multiplayer.finished;
+    turnLabel.textContent = !connected ? "Disconnected" : multiplayer.locked ? "Orders Locked" : "Lock Orders";
+    turnDetail.textContent = connected ? "Reveal when both lock" : "Use Save to reconnect";
+  } else {
+    turnButton.disabled = false;
+    turnLabel.textContent = "End Turn";
+    turnDetail.textContent = "Resolve orders";
+  }
+  $("#diplomacy-button").hidden = !gameState.diplomacy;
+  $("#replay-button").hidden = !gameState.lastReplay?.events.length;
 }
 
 function renderAll() {
@@ -506,6 +675,7 @@ function renderAll() {
 }
 
 function openDialog(kicker, title, content, ready) {
+  if (draftRoute) previewRoute(null);
   const dialog = $("#command-dialog");
   $("#dialog-kicker").textContent = kicker;
   $("#dialog-title").textContent = title;
@@ -517,6 +687,7 @@ function openDialog(kicker, title, content, ready) {
 }
 
 function closeDialog() {
+  if (draftRoute) previewRoute(null);
   const dialog = $("#command-dialog");
   if (dialog.open) dialog.close();
 }
@@ -547,7 +718,7 @@ function openBuyDialog(countryName) {
     update(true);
     $("#buy-form", root).addEventListener("submit", (event) => {
       event.preventDefault();
-      if (withRules(() => queueBuy(gameData, gameState, gameState.playerFaction, countryName, $("#buy-unit", root).value, $("#buy-quantity", root).value))) closeDialog();
+      if (submitOrder("buy", [countryName, $("#buy-unit", root).value, $("#buy-quantity", root).value])) closeDialog();
     });
   });
 }
@@ -561,7 +732,7 @@ function openMoveDialog(fromName) {
       const unitType = $("#move-unit", root).value;
       const target = $("#move-target", root);
       target.innerHTML = countriesAlphabetically(gameData.countries.filter((country) => canReach(gameData, gameState, gameState.playerFaction, fromName, country.name, unitType))).map((country) => {
-        const controlled = gameState.countries[country.name].owner === gameState.playerFaction;
+        const controlled = friendlyFaction(gameState, gameState.playerFaction, gameState.countries[country.name].owner);
         return `<option value="${country.name}" class="${controlled ? "controlled-option" : "uncontrolled-option"}">${escapeHtml(countryLabel(country.name))}${controlled ? " — move" : " — attack"}</option>`;
       }).join("");
       const available = availableUnitCount(gameState, gameState.playerFaction, fromName, unitType);
@@ -571,13 +742,15 @@ function openMoveDialog(fromName) {
       target.disabled = !target.options.length;
       $("#move-submit", root).disabled = !target.options.length;
       $("#move-help", root).textContent = target.options.length ? `${available} uncommitted ${UNIT_TYPES[unitType].label.toLowerCase()} can be ordered.` : "No valid target is in range for this unit.";
+      previewRoute(fromName, target.value, unitType);
     };
     $("#move-unit", root).addEventListener("change", updateTargets); updateTargets();
+    $("#move-target", root).addEventListener("change", (event) => previewRoute(fromName, event.target.value, $("#move-unit", root).value));
     $("#move-form", root).addEventListener("submit", (event) => {
       event.preventDefault();
       let queuedAction;
       const unitType = $("#move-unit", root).value;
-      if (withRules(() => { queuedAction = queueMove(gameData, gameState, gameState.playerFaction, fromName, $("#move-target", root).value, unitType, $("#move-quantity", root).value); })) {
+      if (submitOrder("move", [fromName, $("#move-target", root).value, unitType, $("#move-quantity", root).value], (order) => { queuedAction = order; })) {
         if (unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, queuedAction.id) > 0) openBoardTroopsDialog([queuedAction]);
         else closeDialog();
       }
@@ -586,14 +759,14 @@ function openMoveDialog(fromName) {
 }
 
 function attackSourcesFor(targetName) {
-  return countriesAlphabetically(gameData.countries.filter((country) => gameState.countries[country.name].owner === gameState.playerFaction
+  return countriesAlphabetically(gameData.countries.filter((country) => forceInCountry(gameState.countries[country.name], gameState.playerFaction)
     && Object.keys(UNIT_TYPES).some((unitType) => availableUnitCount(gameState, gameState.playerFaction, country.name, unitType) > 0
       && canReach(gameData, gameState, gameState.playerFaction, country.name, targetName, unitType))));
 }
 
 function openAttackTargetDialog(targetName) {
   const target = gameState.countries[targetName];
-  if (!target || target.owner === gameState.playerFaction) return notify("Select a country outside your control to plan an attack.", "bad");
+  if (!target || friendlyFaction(gameState, gameState.playerFaction, target.owner)) return notify("Select a hostile or neutral country to plan an attack.", "bad");
   const sources = attackSourcesFor(targetName);
   if (!sources.length) return notify(`No controlled country has forces able to reach ${countryLabel(targetName)}.`, "bad");
   const queuedForTarget = () => gameState.queue.filter((action) => action.type === "move" && action.faction === gameState.playerFaction && action.to === targetName);
@@ -620,6 +793,7 @@ function openAttackTargetDialog(targetName) {
         if (Number(quantity.value) > available || Number(quantity.value) < 1) quantity.value = Math.max(1, available);
         $("#attack-submit", root).disabled = !available;
         $("#attack-help", root).textContent = available ? `${available} uncommitted ${UNIT_TYPES[unitSelect.value].label.toLowerCase()} can attack from ${countryLabel(sourceSelect.value)}.` : "No reachable units remain in this country.";
+        previewRoute(sourceSelect.value, targetName, unitSelect.value);
       };
       sourceSelect.addEventListener("change", updateUnits);
       unitSelect.addEventListener("change", updateQuantity);
@@ -628,7 +802,7 @@ function openAttackTargetDialog(targetName) {
         const sourceName = sourceSelect.value;
         const unitType = unitSelect.value;
         let queuedAction;
-        if (withRules(() => { queuedAction = queueMove(gameData, gameState, gameState.playerFaction, sourceName, targetName, unitType, quantity.value); })) {
+        if (submitOrder("move", [sourceName, targetName, unitType, quantity.value], (order) => { queuedAction = order; })) {
           notify(`${UNIT_TYPES[unitType].label} committed from ${countryLabel(sourceName)}. Add another force or close the planner.`, "good");
           if (unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, queuedAction.id) > 0) {
             openBoardTroopsDialog([queuedAction], () => openAttackTargetDialog(targetName));
@@ -663,7 +837,7 @@ function openBoardTroopsDialog(actions, onDone = null) {
     $("#board-later", root).addEventListener("click", () => { if (onDone) onDone(); else closeDialog(); });
     $("#board-form", root).addEventListener("submit", (event) => {
       event.preventDefault();
-      if (withRules(() => boardTroops(gameState, gameState.playerFaction, $("#board-route", root).value, $("#board-quantity", root).value))) {
+      if (submitOrder("board", [$("#board-route", root).value, $("#board-quantity", root).value])) {
         if (onDone) onDone(); else closeDialog();
       }
     });
@@ -686,7 +860,7 @@ function openCountryUpgrades(countryName) {
       const queued = new Set(gameState.queue.filter((action) => action.type === "country-upgrade" && action.faction === gameState.playerFaction && action.country === countryName).map((action) => action.upgradeId));
       $("#country-upgrade-list", root).innerHTML = upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "country", countryName, queued.has(upgrade.id) ? "queued" : "available")).join("")}</div>` : `<p>Every available upgrade has already been built here.</p>`;
       $$('[data-mode="country"]', root).forEach((button) => button.addEventListener("click", () => {
-        if (withRules(() => queueUpgrade(gameData, gameState, gameState.playerFaction, countryName, Number(button.dataset.upgrade)))) render();
+        if (submitOrder("build", [countryName, Number(button.dataset.upgrade)])) render();
       }));
     };
     render();
@@ -698,15 +872,26 @@ function openWorldUpgrades() {
   openDialog("Faction research", "Faction Upgrades", `<div id="world-upgrade-list"></div>`, (root) => {
     const render = () => {
       const faction = gameState.factions[gameState.playerFaction];
-      const naval = faction.unitUpgrades?.find((item) => ["sea-carrier", "advanced-battleship"].includes(item));
       const worldMarkup = upgrades.length ? `<div class="dialog-grid">${upgrades.map((upgrade) => upgradeCard(upgrade, "world", null, faction.worldUpgrades.includes(upgrade.id) ? "built" : "available")).join("")}</div>` : `<p>All faction world upgrades have been completed.</p>`;
-      const doctrineCard = (id, title, image, description) => `<article class="action-card ${naval === id ? "action-complete" : ""}"><img src="${asset(image)}" alt=""><div><h3>${title}</h3><p>${description}</p><button type="button" data-doctrine="${id}" ${naval ? "disabled" : ""}>${naval === id ? "Selected ✓" : naval ? "Alternative locked" : "Select doctrine"}</button></div></article>`;
-      $("#world-upgrade-list", root).innerHTML = `<h3 class="dialog-section-title">World research</h3>${worldMarkup}<h3 class="dialog-section-title">Naval unit upgrade</h3><p class="section-help">Choose one permanent ship specialization.</p><div class="dialog-grid">${doctrineCard("sea-carrier", "Sea Carrier", "SeaCarrierImage.png", "Each ship can carry two troops instead of one.")}${doctrineCard("advanced-battleship", "Advanced Battleship", "AdvancedBattleshipImage.png", "Ships gain 50% attack and defence strength.")}</div>`;
+      const installed = new Set(faction.unitUpgrades || []);
+      const open = availableUnitUpgrades(gameState, gameState.playerFaction);
+      const unitCard = (upgrade, status) => {
+        const complete = status === "installed";
+        const label = complete ? "Installed ✓" : status === "locked" ? "Alternative locked" : `Research $${upgrade.cost.toLocaleString()}`;
+        return `<article class="action-card ${complete ? "action-complete" : ""}"><img src="${asset(upgrade.image)}" alt=""><div><h3>${escapeHtml(upgrade.title)} ${complete ? "" : `<span class="price">$${upgrade.cost.toLocaleString()}</span>`}</h3><p>${escapeHtml(localized(`${upgrade.title} Description`, "Permanent unit specialization."))}</p><button type="button" data-unit-upgrade="${upgrade.id}" ${status !== "open" || faction.cash < upgrade.cost ? "disabled" : ""}>${label}</button></div></article>`;
+      };
+      const sections = Object.keys(UNIT_TYPES).map((unitType) => {
+        const owned = (faction.unitUpgrades || []).map((id) => unitUpgradeById(id)).find((upgrade) => upgrade?.unitType === unitType);
+        const cards = unitUpgradeBranch(unitType).map((upgrade) => unitCard(upgrade, installed.has(upgrade.id) ? "installed" : owned ? "locked" : "open")).join("");
+        return `<h3 class="dialog-section-title">${escapeHtml(UNIT_TYPES[unitType].label)} specialization</h3><div class="dialog-grid">${cards}</div>`;
+      }).join("");
+      const availableNote = open.length ? "" : `<p class="section-help">Every unit branch has been researched.</p>`;
+      $("#world-upgrade-list", root).innerHTML = `<h3 class="dialog-section-title">World research</h3>${worldMarkup}<h3 class="dialog-section-title">Unit research</h3><p class="section-help">Choose one permanent specialization per unit type. ${escapeHtml(availableNote)}</p>${sections}`;
       $$('[data-mode="world"]', root).forEach((button) => button.addEventListener("click", () => {
-        if (withRules(() => buyWorldUpgrade(gameData, gameState, gameState.playerFaction, Number(button.dataset.upgrade)))) render();
+        if (submitOrder("research", [Number(button.dataset.upgrade)])) render();
       }));
-      $$('[data-doctrine]', root).forEach((button) => button.addEventListener("click", () => {
-        if (withRules(() => chooseNavalDoctrine(gameState, gameState.playerFaction, button.dataset.doctrine))) render();
+      $$('[data-unit-upgrade]', root).forEach((button) => button.addEventListener("click", () => {
+        if (submitOrder("specialize", [button.dataset.unitUpgrade])) render();
       }));
     };
     render();
@@ -722,7 +907,7 @@ function openCountryInfo(countryName) {
 function openSpyDialog(defaultTarget = null) {
   const targets = countriesAlphabetically(gameData.countries.filter((country) => {
     const owner = gameState.countries[country.name].owner;
-    return owner && owner !== gameState.playerFaction;
+    return owner && !friendlyFaction(gameState, gameState.playerFaction, owner);
   }));
   if (!targets.length) return notify("No enemy countries remain.");
   const options = targets.map((country) => `<option value="${country.name}" ${country.name === defaultTarget ? "selected" : ""}>${escapeHtml(countryLabel(country.name))}</option>`).join("");
@@ -730,8 +915,8 @@ function openSpyDialog(defaultTarget = null) {
   const strategic = `${faction.nukes > 0 ? `<article class="action-card"><img src="${asset("ManhattanProjectImage.png")}" alt=""><div><h3>Nuclear strike (${faction.nukes})</h3><p>Erase the target garrison, infrastructure, and control.</p><button type="button" data-weapon="nuke">Launch</button></div></article>` : ""}${faction.worldUpgrades.includes(17) ? `<article class="action-card"><img src="${asset("RailGunImage.png")}" alt=""><div><h3>Rail Gun</h3><p>Destroy roughly 85% of every defending unit. Ready ${faction.railGunReady <= gameState.year ? "now" : `in ${faction.railGunReady}`}.</p><button type="button" data-weapon="railgun" ${faction.railGunReady > gameState.year ? "disabled" : ""}>Fire</button></div></article>` : ""}`;
   const cards = Object.entries(SPY_ACTIONS).map(([id, action]) => `<article class="action-card"><img src="${asset(id === "intelligence" ? "IntelligenceImage.png" : id === "bribery" ? "BriberyImage.png" : "HitImage.png")}" alt=""><div><h3>${action.title} <span class="price">$${action.cost}</span></h3><p>${escapeHtml(localized(`Spy Action ${action.title} Description`, action.description))}</p><button type="button" data-spy="${id}" ${action.upgrade && !faction.worldUpgrades.includes(action.upgrade) ? "disabled" : ""}>Use</button></div></article>`).join("");
   openDialog("Immediate operations", "Spying & Strategic Weapons", `<label>Target<select id="spy-target">${options}</select></label><div class="dialog-grid" style="margin-top:14px">${cards}${strategic}</div>`, (root) => {
-    $$('[data-spy]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => useSpyAction(gameData, gameState, gameState.playerFaction, button.dataset.spy, $("#spy-target", root).value))) closeDialog(); }));
-    $$('[data-weapon]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => useStrategicWeapon(gameState, gameState.playerFaction, button.dataset.weapon, $("#spy-target", root).value))) closeDialog(); }));
+    $$('[data-spy]', root).forEach((button) => button.addEventListener("click", () => { if (submitOrder("spy", [button.dataset.spy, $("#spy-target", root).value])) closeDialog(); }));
+    $$('[data-weapon]', root).forEach((button) => button.addEventListener("click", () => { if (submitOrder("strike", [button.dataset.weapon, $("#spy-target", root).value])) closeDialog(); }));
   });
 }
 
@@ -745,7 +930,7 @@ function actionDescription(action) {
 function openQueue() {
   const actions = gameState.queue.filter((action) => action.faction === gameState.playerFaction);
   openDialog("Pending orders", "Action Queue", actions.length ? `<div class="queue-list">${actions.map((action) => `<div class="queue-item"><div><strong>${escapeHtml(actionDescription(action))}</strong><span>${action.cost ? ` · $${action.cost} reserved` : action.unitType === "ships" ? ` · ${availableBoardingCapacity(gameState, gameState.playerFaction, action.id)} troop spaces free` : ""}</span></div><div class="queue-buttons">${action.unitType === "ships" && availableBoardingCapacity(gameState, gameState.playerFaction, action.id) > 0 ? `<button type="button" data-board="${action.id}">Board</button>` : ""}<button type="button" data-cancel="${action.id}">Cancel</button></div></div>`).join("")}</div>` : `<p>No orders are queued. Spy actions are processed immediately.</p>`, (root) => {
-    $$('[data-cancel]', root).forEach((button) => button.addEventListener("click", () => { if (withRules(() => cancelAction(gameState, button.dataset.cancel))) { closeDialog(); openQueue(); } }));
+    $$('[data-cancel]', root).forEach((button) => button.addEventListener("click", () => { if (submitOrder("cancel", [button.dataset.cancel])) openQueue(); }));
     $$('[data-board]', root).forEach((button) => button.addEventListener("click", () => {
       const action = gameState.queue.find((item) => item.id === button.dataset.board);
       if (action) openBoardTroopsDialog([action]);
@@ -753,6 +938,10 @@ function openQueue() {
   });
 }
 
+function medalSummary(state) {
+  const won = awardedMedals(state).length;
+  return `${won} of ${MEDALS.length} recovered medals awarded. Difficulty: ${DIFFICULTIES.find((item) => item.id === state.difficulty)?.rank || state.difficulty}.`;
+}
 function openObjective() {
   const faction = gameState.factions[gameState.playerFaction];
   const controlledCountries = countriesAlphabetically(gameData.countries.filter((country) => gameState.countries[country.name].owner === gameState.playerFaction));
@@ -761,8 +950,16 @@ function openObjective() {
     const units = gameState.countries[country.name].units;
     return `<article class="force-country"><button type="button" data-force-country="${country.name}">${escapeHtml(countryLabel(country.name))}</button><div>${Object.entries(UNIT_TYPES).map(([unitType, meta]) => `<span title="${meta.label}"><img src="${asset(meta.icon)}" alt=""><b>${units[unitType].toLocaleString()}</b><small>${meta.label}</small></span>`).join("")}</div></article>`;
   }).join("");
-  const log = gameState.log.slice(0, 18).map((item) => `<div class="log-item"><span>${item.year}</span><strong>${escapeHtml(item.message)}</strong></div>`).join("");
-  openDialog(faction.general.name, OBJECTIVES[gameState.objective].title, `<p>${escapeHtml(OBJECTIVES[gameState.objective].description)}</p><div class="intel-panel">Rank ${faction.general.level} · ${faction.conquests} conquests · ${owned} countries · $${faction.cash.toLocaleString()}</div><h3 class="dialog-section-title">Controlled-country forces</h3><p class="section-help">Every garrison under your command, sorted A–Z. Select a country name to find it on the map.</p><div class="force-overview">${forceCards}</div><h3 class="dialog-section-title">Campaign log</h3><div class="log-list">${log}</div>`, (root) => {
+  const medalCards = () => {
+    const won = new Set(awardedMedals(gameState).map((medal) => medal.id));
+    return MEDALS.map((medal) => {
+      const earned = won.has(medal.id);
+      const name = escapeHtml(localized(medal.name, medal.name));
+      const description = escapeHtml(localized(`${medal.name} Description`, medal.description));
+      return `<article class="medal-card ${earned ? "medal-earned" : ""}"><span class="medal-ribbon"><img src="${asset(earned ? medal.image : "medalDisabled.png")}" alt=""></span><div><h3>${name}</h3><p>${description}</p><span class="medal-status">${earned ? "Awarded ✓" : "Not yet awarded"}</span></div></article>`;
+    }).join("");
+  };  const log = gameState.log.slice(0, 18).map((item) => `<div class="log-item"><span>${item.year}</span><strong>${escapeHtml(item.message)}</strong></div>`).join("");
+  openDialog(faction.general.name, OBJECTIVES[gameState.objective].title, `<p>${escapeHtml(OBJECTIVES[gameState.objective].description)}</p><div class="intel-panel">Rank ${faction.general.level} · ${faction.conquests} conquests · ${owned} countries · $${faction.cash.toLocaleString()}</div><h3 class="dialog-section-title">Controlled-country forces</h3><p class="section-help">Every garrison under your command, sorted A–Z. Select a country name to find it on the map.</p><div class="force-overview">${forceCards}</div><h3 class="dialog-section-title">Medals</h3><p class="section-help">${escapeHtml(medalSummary(gameState))}</p><div class="medal-grid">${medalCards()}</div><h3 class="dialog-section-title">Campaign log</h3><div class="log-list">${log}</div>`, (root) => {
     $$('[data-force-country]', root).forEach((button) => button.addEventListener("click", () => {
       selectedCountry = button.dataset.forceCountry;
       closeDialog();
@@ -778,8 +975,106 @@ function openSettings() {
   });
 }
 
+function openDiplomacy(defaultTarget = null) {
+  const actor = gameState.playerFaction;
+  const diplomacy = gameState.diplomacy;
+  if (!diplomacy) return;
+  const factions = gameData.factions.filter(({ factionName }) => factionName !== actor && !gameState.factions[factionName].defeated);
+  const label = (name) => escapeHtml(FACTION_META[name].short);
+  const allies = factions.filter(({ factionName }) => allianceBetween(gameState, actor, factionName));
+  const cards = factions.map(({ factionName: name }) => {
+    const pact = allianceBetween(gameState, actor, name);
+    const incoming = diplomacy.offers.some(({ from, to }) => from === name && to === actor);
+    const outgoing = diplomacy.offers.some(({ from, to }) => from === actor && to === name);
+    const button = (action, text) => `<button class="secondary-button" type="button" data-treaty="${action}" data-partner="${escapeHtml(name)}">${text}</button>`;
+    return `<section class="treaty-card"><strong>${label(name)}</strong><div>${pact
+      ? pact.locked ? "Co-op partner" : `Allied ${button("end", "End alliance")}`
+      : incoming ? `${button("accept", "Accept")} ${button("decline", "Decline")}`
+      : outgoing ? "Offer pending" : button("propose", "Offer alliance")}</div></section>`;
+  }).join("");
+  const requests = diplomacy.requests.filter(({ to }) => to === actor);
+  const requestSummary = requests.map(({ from, target }) => `<p>${label(from)} asked for support in ${escapeHtml(countryLabel(target))}.</p>`).join("");
+  const pending = diplomacy.requests.filter(({ from }) => from === actor)
+    .map(({ to, target }) => `<p>Request sent to ${label(to)} for ${escapeHtml(countryLabel(target))}.</p>`).join("");
+  const support = allies.length ? `<h3>Request military support</h3><form id="support-form" class="dialog-form">
+    <label>Ally<select name="partner">${allies.map(({ factionName }) => `<option value="${escapeHtml(factionName)}">${label(factionName)}</option>`).join("")}</select></label>
+    <label>Country<select name="target">${countriesAlphabetically().map(({ name }) => `<option value="${name}" ${name === defaultTarget ? "selected" : ""}>${escapeHtml(countryLabel(name))}</option>`).join("")}</select></label>
+    <button class="primary-button" type="submit">Request support</button></form>` : "";
+  openDialog("Alliances & logistics", "Diplomacy", `<p class="section-help">Allies can station forces in each other’s countries and combine attacks. The faction with the most surviving troops takes control after a joint capture.</p>${requestSummary}${pending}${cards}${support}`, (root) => {
+    $$("[data-treaty]", root).forEach((button) => button.addEventListener("click", () => {
+      if (submitOrder("treaty", [button.dataset.treaty, button.dataset.partner])) openDiplomacy(defaultTarget);
+    }));
+    $("#support-form", root)?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const { partner, target } = event.currentTarget.elements;
+      if (submitOrder("support", [partner.value, target.value])) openDiplomacy(target.value);
+    });
+  });
+}
+
+function showReplayStep() {
+  if (!replay) return;
+  const event = replay.events[replay.index];
+  const faction = FACTION_META[event.attacker || event.faction]?.short;
+  const route = `${countryLabel(event.from)} → ${countryLabel(event.country)}`;
+  const result = event.type === "transfer" ? "Reinforcements arrived"
+    : event.won ? `${FACTION_META[event.winner]?.short || "Coalition"} captured the country` : "The defenders held";
+  $("#replay-caption").textContent = `${replay.year} · ${replay.index + 1}/${replay.events.length} · ${faction} · ${event.quantity} ${UNIT_TYPES[event.unitType].label.toLowerCase()} · ${route} · ${result}`;
+  $("#replay-prev").disabled = replay.index === 0;
+  $("#replay-next").disabled = replay.index === replay.events.length - 1;
+  drawMap();
+}
+
+function openReplay() {
+  if (replay || !gameState.lastReplay?.events.length) return;
+  replay = { ...gameState.lastReplay, index: 0, timer: null, map: { zoom: mapView.zoom, panX: mapView.panX, panY: mapView.panY } };
+  Object.assign(mapView, { zoom: 1, panX: 0, panY: 0 });
+  $("#turn-replay").hidden = false;
+  showReplayStep();
+}
+
+function closeReplay() {
+  if (!replay) return;
+  clearInterval(replay.timer);
+  Object.assign(mapView, replay.map);
+  replay = null;
+  $("#turn-replay").hidden = true;
+  $("#replay-play").textContent = "Play";
+  drawMap();
+}
+
+function stepReplay(amount) {
+  if (!replay) return;
+  replay.index = Math.max(0, Math.min(replay.events.length - 1, replay.index + amount));
+  showReplayStep();
+}
+
+function toggleReplay() {
+  if (!replay) return;
+  if (replay.timer) {
+    clearInterval(replay.timer);
+    replay.timer = null;
+    $("#replay-play").textContent = "Play";
+    return;
+  }
+  if (replay.index === replay.events.length - 1) {
+    replay.index = 0;
+    showReplayStep();
+  }
+  $("#replay-play").textContent = "Pause";
+  replay.timer = setInterval(() => {
+    if (!replay || replay.index === replay.events.length - 1) toggleReplay();
+    else stepReplay(1);
+  }, 1100);
+}
+
 function exitToMenu(saveCurrent) {
-  if (saveCurrent) {
+  closeReplay();
+  if (multiplayer) {
+    const { peer } = multiplayer;
+    multiplayer = null;
+    peer.close();
+  } else if (saveCurrent) {
     autosave();
     sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
   } else if (sessionSaveBaseline === null) localStorage.removeItem(SAVE_KEY);
@@ -793,6 +1088,13 @@ function exitToMenu(saveCurrent) {
 }
 
 function openExitPrompt() {
+  if (multiplayer) {
+    openDialog("Multiplayer", "Leave Match?", '<p>The match is saved in this browser. Reconnect later with a fresh invite from the host.</p><div class="dialog-actions"><button id="leave-match" class="primary-button" type="button">Leave match</button><button id="stay-game" class="secondary-button" type="button">Stay in match</button></div>', (root) => {
+      $("#leave-match", root).addEventListener("click", () => exitToMenu(false));
+      $("#stay-game", root).addEventListener("click", closeDialog);
+    });
+    return;
+  }
   openDialog("Leave campaign", "Return to Main Menu?", `<p>Save the current position before leaving the battlefield?</p><div class="dialog-actions exit-actions"><button id="save-exit" class="primary-button" type="button">Save & Exit</button><button id="discard-exit" class="secondary-button danger-button" type="button">Exit Without Saving</button><button id="stay-game" class="secondary-button" type="button">Stay in Game</button></div>`, (root) => {
     $("#save-exit", root).addEventListener("click", () => exitToMenu(true));
     $("#discard-exit", root).addEventListener("click", () => exitToMenu(false));
@@ -806,17 +1108,18 @@ function groupedPlayerBattles(events) {
     if (!groups.has(event.country)) groups.set(event.country, { country: event.country, events: [], participants: [] });
     const group = groups.get(event.country);
     group.events.push(event);
-    for (const faction of [event.defender, event.attacker]) {
+    for (const faction of [event.defender, event.attacker, ...(event.defendingAllies || [])]) {
       const key = faction || "__neutral__";
       if (!group.participants.some((item) => item.key === key)) group.participants.push({ key, faction });
     }
   }
-  return [...groups.values()].filter((group) => group.events.some((event) => event.attacker === gameState.playerFaction || event.defender === gameState.playerFaction));
+  return [...groups.values()].filter((group) => group.events.some((event) =>
+    event.attacker === gameState.playerFaction || event.defender === gameState.playerFaction || event.defendingAllies?.includes(gameState.playerFaction)));
 }
 
 function battleParticipantMarkup(participant) {
   const meta = participant.faction ? FACTION_META[participant.faction] : { short: "Neutral", flag: "neutralFlag.png", color: "#67717b" };
-  return `<article class="battle-faction" data-faction="${escapeHtml(participant.key)}" style="--faction-color:${meta.color}"><img src="${asset(meta.flag)}" alt=""><strong>${escapeHtml(meta.short)}</strong><span>In position</span></article>`;
+  return `<article class="battle-faction" data-faction="${escapeHtml(participant.key)}" style="--faction-color:${meta.color}">${factionMark(meta)}<strong>${escapeHtml(meta.short)}</strong><span class="battle-position">In position</span></article>`;
 }
 
 async function waitBattle(milliseconds) {
@@ -851,12 +1154,44 @@ function focusedMapView(countryName) {
   return { zoom, panX: (width / 2 - point[0]) * zoom, panY: (height / 2 - point[1]) * zoom };
 }
 
+function openCountryFinder() {
+  const options = countriesAlphabetically().map(({ name }) => `<option value="${escapeHtml(name)}">${escapeHtml(countryLabel(name))}</option>`).join("");
+  openDialog("World map", "Find a Country", `<form id="find-country-form" class="dialog-form"><label>Country<select id="country-locator">${options}</select></label><button class="primary-button" type="submit">Show on map</button></form>`, (root) => {
+    const select = $("#country-locator", root);
+    if (selectedCountry) select.value = selectedCountry;
+    $("#find-country-form", root).addEventListener("submit", (event) => {
+      event.preventDefault();
+      const country = gameData.map.countries.find(({ name }) => name === select.value);
+      if (!country) return;
+      const { width, height } = logicalSize();
+      const vertices = gameData.map.vertices.slice(country.vertexStart, country.vertexStart + country.vertexLength);
+      const points = vertices.map((vertex) => pointOnMap(vertex, width, height));
+      const xs = points.map(([x]) => x);
+      const ys = points.map(([, y]) => y);
+      const left = Math.min(...xs), right = Math.max(...xs);
+      const top = Math.min(...ys), bottom = Math.max(...ys);
+      const zoom = clampMapZoom(Math.min(width * .55 / Math.max(right - left, 1), height * .55 / Math.max(bottom - top, 1)));
+      Object.assign(mapView, {
+        zoom,
+        panX: (width - left - right) / 2 * zoom,
+        panY: (height - top - bottom) / 2 * zoom,
+      });
+      selectedCountry = window.matchMedia("(max-width: 850px)").matches ? null : country.name;
+      closeDialog();
+      renderAll();
+      notify(countryLabel(country.name));
+    });
+  });
+}
+
 function battleResultText(group, finalOwner) {
   const player = gameState.playerFaction;
   const playerAttacked = group.events.some((event) => event.attacker === player);
-  const playerDefended = group.events.some((event) => event.defender === player);
+  const playerDefended = group.events.some((event) => event.defender === player || event.defendingAllies?.includes(player));
+  const allyHeld = Boolean(gameState.countries[group.country].visitors?.[player]);
   if (finalOwner === player && playerAttacked) return `${FACTION_META[player].short} conquered ${countryLabel(group.country)}.`;
-  if (finalOwner === player && playerDefended) return `${countryLabel(group.country)} held. The defence stands.`;
+  if (allyHeld && playerAttacked) return `${FACTION_META[finalOwner].short} captured ${countryLabel(group.country)} with your support.`;
+  if ((finalOwner === player || allyHeld) && playerDefended) return `${countryLabel(group.country)} held. The defence stands.`;
   if (playerAttacked) return `The attack on ${countryLabel(group.country)} was defeated.`;
   return `${countryLabel(group.country)} was lost to ${finalOwner ? FACTION_META[finalOwner].short : "neutral forces"}.`;
 }
@@ -900,15 +1235,18 @@ async function playBattleSequence(events) {
     drawMap();
     const winnerKey = finalOwner || "__neutral__";
     $$(".battle-faction", overlay).forEach((card) => {
-      const won = card.dataset.faction === winnerKey;
+      const participant = card.dataset.faction;
+      const won = participant === winnerKey || Boolean(finalOwner && gameState.countries[group.country].visitors?.[participant]);
       card.classList.toggle("winner", won);
       card.classList.toggle("fallen", !won);
-      $("span", card).textContent = won ? "Holds the field" : "Defeated";
+      $(".battle-position", card).textContent = participant === winnerKey ? "Holds the field" : won ? "Allied support" : "Defeated";
     });
     $("#battle-progress-fill").style.width = "100%";
     $("#battle-result").textContent = battleResultText(group, finalOwner);
     $("#battle-sequence").classList.remove("battle-clash");
-    const playerLost = group.events.some((event) => event.attacker === gameState.playerFaction) && finalOwner !== gameState.playerFaction;
+    const player = gameState.playerFaction;
+    const playerLost = group.events.some((event) => event.attacker === player) && finalOwner !== player
+      && !gameState.countries[group.country].visitors?.[player];
     if (playerLost) playBattleSound("failed", 0.72);
     if (!battleSkipAll) await waitBattle(resultWasRequested ? 1100 : 2200);
     else await delay(100);
@@ -934,13 +1272,20 @@ function buildManual() {
 }
 
 function checkEnding() {
-  checkVictory(gameState);
-  if (gameState.status === "playing") return;
-  const victory = gameState.status === "victory";
+  if (!multiplayer) checkVictory(gameState);
+  if (multiplayer ? !multiplayer.finished : gameState.status === "playing") return;
+  const victory = multiplayer && multiplayer.setup.mode !== "coop" ? gameState.winner === gameState.playerFaction : gameState.status === "victory";
   $("#ending").hidden = false;
+  $("#ending-replay").hidden = !gameState.lastReplay?.events.length;
   $("#ending").style.backgroundImage = `linear-gradient(rgba(0,0,0,.25),rgba(0,0,0,.72)), url("${asset(victory ? "victoryScreenBackground.png" : "defeatScreenBackground.png")}")`;
   $("#ending-title").textContent = victory ? "Victory" : "Defeat";
   $("#ending-copy").textContent = victory ? "Your objective is complete. The world has a new order." : "Your last country has fallen. History belongs to another faction.";
+  if (multiplayer?.setup.mode === "coop") {
+    $("#ending-copy").textContent = victory ? "Your coalition defeated the remaining factions." : "The coalition has lost all of its countries.";
+  } else if (multiplayer) {
+    $("#ending-title").textContent = victory ? "Victory" : gameState.winner ? "Defeat" : "Draw";
+    $("#ending-copy").textContent = gameState.winner ? `${FACTION_META[gameState.winner].short} wins the match.` : "Both players were eliminated.";
+  }
 }
 
 function activePinchMetrics() {
@@ -1024,15 +1369,41 @@ function finishMapPointer(event, allowPick) {
 
 function bindEvents() {
   $("#new-game-button").addEventListener("click", () => showScreen("setup-screen"));
-  $("#resume-button").addEventListener("click", () => { const saved = readSave(); if (saved) { sessionSaveBaseline = localStorage.getItem(SAVE_KEY); gameState = saved; selectedCountry = initialCountrySelection(gameState.playerFaction); showScreen("game-screen"); } });
+  $("#resume-button").addEventListener("click", () => {
+    const saved = readSave();
+    if (!saved) return;
+    sessionSaveBaseline = localStorage.getItem(SAVE_KEY);
+    gameState = saved;
+    gameData = scenarioData(boardData, saved.scenario);
+    selectedCountry = initialCountrySelection(saved.playerFaction);
+    showScreen("game-screen");
+  });
+  $("#multiplayer-button").addEventListener("click", () => openMultiplayer());
   $("#import-save-button").addEventListener("click", () => $("#save-file-input").click());
   $("#save-file-input").addEventListener("change", (event) => importCampaignFile(event.target.files[0]));
   $("#manual-button").addEventListener("click", () => showScreen("manual-screen"));
   $("#about-button").addEventListener("click", () => showScreen("about-screen"));
   $$('[data-screen]').forEach((button) => button.addEventListener("click", () => showScreen(button.dataset.screen)));
   $("#setup-form").addEventListener("submit", (event) => { event.preventDefault(); startCampaign(); });
+  $("#campaign-scenario").addEventListener("change", (event) => {
+    if (event.target.value) $("#campaign-alliances").checked = true;
+    buildFactionOptions();
+  });
   $(".dialog-close").addEventListener("click", closeDialog);
-  $("#command-dialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeDialog(); });
+  const dialog = $("#command-dialog");
+  dialog.addEventListener("close", () => { if (!dialog.open && draftRoute) previewRoute(null); });
+  function isBackdrop(event) {
+    const { left, right, top, bottom } = dialog.getBoundingClientRect();
+    return event.target === dialog && (event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom);
+  }
+  let backdropPointer = null;
+  dialog.addEventListener("pointerdown", (event) => { backdropPointer = isBackdrop(event) ? event.pointerId : null; });
+  dialog.addEventListener("pointerup", (event) => {
+    const dismiss = backdropPointer === event.pointerId && isBackdrop(event);
+    backdropPointer = null;
+    if (dismiss) closeDialog();
+  });
+  dialog.addEventListener("pointercancel", () => { backdropPointer = null; });
   $("#queue-button").addEventListener("click", openQueue);
   $("#world-upgrades-button").addEventListener("click", openWorldUpgrades);
   $("#espionage-button").addEventListener("click", () => openSpyDialog(selectedCountry));
@@ -1041,16 +1412,45 @@ function bindEvents() {
   $("#settings-button").addEventListener("click", openSettings);
   $("#exit-button").addEventListener("click", openExitPrompt);
   $("#end-turn-button").addEventListener("click", async () => {
+    if (multiplayer) {
+      try {
+        await multiplayer.lock();
+      } catch (error) {
+        notify(error.message || "Could not lock orders. Reconnect from your match save.", "bad");
+      }
+      return;
+    }
+    closeReplay();
     const battles = [];
     if (withRules(() => { endTurn(gameData, gameState, battles); notify(`Orders resolved. Year ${gameState.year} begins.`, "good"); })) await playBattleSequence(battles);
   });
   $("#skip-battle").addEventListener("click", () => { battleSkipCurrent = true; stopBattleAudio(); });
   $("#skip-all-battles").addEventListener("click", () => { battleSkipCurrent = battleSkipAll = true; stopBattleAudio(); });
   $(".battle-backdrop").addEventListener("click", () => { battleSkipCurrent = true; stopBattleAudio(); });
-  $("#ending-menu").addEventListener("click", () => { $("#ending").hidden = true; showScreen("menu-screen"); });
-  $("#zoom-in").addEventListener("click", () => { mapView.zoom = Math.min(4, mapView.zoom * 1.25); drawMap(); });
-  $("#zoom-out").addEventListener("click", () => { mapView.zoom = Math.max(1, mapView.zoom / 1.25); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); });
+  $("#ending-menu").addEventListener("click", () => { $("#ending").hidden = true; if (multiplayer) exitToMenu(false); else showScreen("menu-screen"); });
+  $("#ending-replay").addEventListener("click", () => { $("#ending").hidden = true; openReplay(); });
+  $("#zoom-in").addEventListener("click", () => {
+    const zoom = clampMapZoom(mapView.zoom * 1.5);
+    mapView.panX *= zoom / mapView.zoom;
+    mapView.panY *= zoom / mapView.zoom;
+    mapView.zoom = zoom;
+    drawMap();
+  });
+  $("#zoom-out").addEventListener("click", () => {
+    const zoom = clampMapZoom(mapView.zoom / 1.5);
+    mapView.panX = zoom === 1 ? 0 : mapView.panX * zoom / mapView.zoom;
+    mapView.panY = zoom === 1 ? 0 : mapView.panY * zoom / mapView.zoom;
+    mapView.zoom = zoom;
+    drawMap();
+  });
   $("#reset-map").addEventListener("click", () => { mapView.zoom = 1; mapView.panX = mapView.panY = 0; drawMap(); });
+  $("#find-country").addEventListener("click", openCountryFinder);
+  $("#diplomacy-button").addEventListener("click", () => openDiplomacy(selectedCountry));
+  $("#replay-button").addEventListener("click", openReplay);
+  $("#replay-prev").addEventListener("click", () => stepReplay(-1));
+  $("#replay-next").addEventListener("click", () => stepReplay(1));
+  $("#replay-play").addEventListener("click", toggleReplay);
+  $("#replay-close").addEventListener("click", () => { closeReplay(); checkEnding(); });
   canvas.addEventListener("wheel", (event) => { event.preventDefault(); mapView.zoom = clampMapZoom(mapView.zoom * (event.deltaY < 0 ? 1.12 : .9)); if (mapView.zoom === 1) mapView.panX = mapView.panY = 0; drawMap(); }, { passive: false });
   canvas.addEventListener("pointerdown", handleMapPointerDown);
   canvas.addEventListener("pointermove", handleMapPointerMove);
@@ -1069,14 +1469,42 @@ function bindEvents() {
   new ResizeObserver(() => { resizeMap(); drawMap(); }).observe(canvas);
 }
 
-const clampMapZoom = (value) => Math.max(1, Math.min(4, value));
+function unlockApp() {
+  const key = "wargame-session-access";
+  try { if (sessionStorage.getItem(key) === "1") return Promise.resolve(); } catch {}
+  const gate = $("#access-gate");
+  const field = $("#access-password");
+  const form = $("#access-form");
+  $("#loading").hidden = true;
+  gate.hidden = false;
+  field.focus();
+  return new Promise((resolve) => {
+    function handleSubmit(event) {
+      event.preventDefault();
+      if (field.value !== "wargame") {
+        $("#access-error").textContent = "Incorrect password.";
+        field.select();
+        return;
+      }
+      try { sessionStorage.setItem(key, "1"); } catch {}
+      form.removeEventListener("submit", handleSubmit);
+      field.value = "";
+      gate.hidden = true;
+      $("#loading").hidden = false;
+      resolve();
+    }
+    form.addEventListener("submit", handleSubmit);
+  });
+}
 
 async function boot() {
   try {
+    await unlockApp();
     [gameData, localization] = await Promise.all([
       fetch("./data/game-data.json").then((response) => response.json()),
       fetch("./data/localization-en.json").then((response) => response.json()),
     ]);
+    boardData = gameData;
     prepareMapGeometry();
     buildSetup();
     buildManual();
@@ -1085,6 +1513,12 @@ async function boot() {
     updateResumeButton();
     $("#loading").remove();
     $("#app").hidden = false;
+    if (location.hash.startsWith("#match=")) {
+      const hash = location.hash;
+      history.replaceState(null, "", location.pathname + location.search);
+      try { openMultiplayer(parseSignalCode(hash)); }
+      catch (error) { notify(error.message, "bad"); }
+    }
   } catch (error) {
     $("#loading").innerHTML = `<strong>Unable to load preservation data.</strong><p>${escapeHtml(error.message)}</p>`;
     console.error(error);

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CAPITAL_MARKER_OVERRIDES, decodeHitColor, encodeHitColor, mapProjectionFrame, pinchMapView, projectMapPoint } from "../src/projection.js";
+import { CAPITAL_MARKER_OVERRIDES, MAX_MAP_ZOOM, decodeHitColor, encodeHitColor, hitTestPixel, mapProjectionFrame, pinchMapView, projectMapPoint } from "../src/projection.js";
 
 const data = JSON.parse(fs.readFileSync(fileURLToPath(new URL("../data/game-data.json", import.meta.url)), "utf8"));
 
@@ -37,7 +37,8 @@ test("portrait projection keeps the original landscape proportions and centers t
 test("two-finger gestures zoom around their moving midpoint", () => {
   const start = { zoom: 1, panX: 0, panY: 0, distance: 70, centerX: 195, centerY: 338, canvasWidth: 390, canvasHeight: 676 };
   assert.deepEqual(pinchMapView(start, { ...start, distance: 140 }), { zoom: 2, panX: 0, panY: 0 });
-  assert.deepEqual(pinchMapView(start, { ...start, distance: 350 }), { zoom: 4, panX: 0, panY: 0 });
+  assert.deepEqual(pinchMapView(start, { ...start, distance: 700 }), { zoom: 10, panX: 0, panY: 0 });
+  assert.deepEqual(pinchMapView(start, { ...start, distance: 3500 }), { zoom: MAX_MAP_ZOOM, panX: 0, panY: 0 });
 
   const moved = pinchMapView(start, { ...start, distance: 140, centerX: 215, centerY: 348 });
   assert.deepEqual(moved, { zoom: 2, panX: 20, panY: 10 });
@@ -61,4 +62,21 @@ test("every capital star is anchored inside its country", () => {
     }
     assert.equal(inside, true, `${country.name} capital marker`);
   }
+});
+
+test("hit testing clamps to the canvas so a far-edge click cannot throw", () => {
+  // resizeMap sizes the backing store with Math.round, so a pick must scale by
+  // the real canvas size rather than recompute devicePixelRatio.
+  for (const [cssSize, ratio] of [[1440, 1], [1440, 1.25], [1366, 1.5], [1920, 2], [1024, 1.75], [2560, 1.5]]) {
+    const canvasSize = Math.round(cssSize * ratio);
+    for (const offset of [0, 1, cssSize / 2, cssSize - 1, cssSize, cssSize + 40, -5]) {
+      const pixel = hitTestPixel(offset, cssSize, canvasSize);
+      assert.ok(Number.isInteger(pixel), `${cssSize}@${ratio} offset ${offset}`);
+      assert.ok(pixel >= 0 && pixel < canvasSize,
+        `offset ${offset} on ${cssSize}@${ratio} produced ${pixel}, outside 0..${canvasSize - 1}`);
+    }
+  }
+  // A zero-sized element must not divide by zero.
+  assert.equal(hitTestPixel(10, 0, 100), -1);
+  assert.equal(hitTestPixel(10, 100, 0), -1);
 });

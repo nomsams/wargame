@@ -22,6 +22,15 @@
     <p>Recovering strategic command…</p>
   </div>
 
+  <section id="access-gate" class="access-gate" hidden aria-labelledby="access-title">
+    <form id="access-form" class="access-card">
+      <h1 id="access-title">Wargame</h1>
+      <label>Access password<input id="access-password" type="password" autocomplete="current-password" required></label>
+      <button class="primary-button" type="submit">Enter game</button>
+      <p id="access-error" role="status"></p>
+    </form>
+  </section>
+
   <main id="app" hidden>
     <section id="menu-screen" class="screen menu-screen active" aria-labelledby="menu-title">
       <div class="menu-card">
@@ -30,6 +39,7 @@
         <nav class="menu-actions" aria-label="Main menu">
           <button id="new-game-button" class="stencil-button">New Game</button>
           <button id="resume-button" class="stencil-button">Resume Game</button>
+          <button id="multiplayer-button" class="stencil-button">Multiplayer</button>
           <button id="import-save-button" class="stencil-button">Import Save File</button>
           <button id="manual-button" class="stencil-button">Field Manual</button>
           <button id="about-button" class="stencil-button">Preservation Notes</button>
@@ -50,13 +60,9 @@
         <div class="setup-options">
           <label>General name <input id="hero-name" maxlength="24" value="General" autocomplete="off"></label>
           <label>Objective <select id="objective-select"></select></label>
-          <label>Difficulty
-            <select id="difficulty-select">
-              <option value="easy">Colonel</option>
-              <option value="normal" selected>Marshal</option>
-              <option value="hard">General</option>
-            </select>
-          </label>
+          <label>Difficulty <select id="difficulty-select"></select></label>
+          <label>Scenario <select id="campaign-scenario"><option value="">Classic board</option><option value="regional-coalitions">Regional Coalitions (fictional)</option></select></label>
+          <label class="alliance-choice"><input id="campaign-alliances" type="checkbox"> Enable alliances and logistics</label>
         </div>
         <button class="primary-button" type="submit">Deploy forces</button>
       </form>
@@ -66,6 +72,7 @@
       <header class="status-bar">
         <div class="faction-status">
           <img id="status-flag" alt="" width="42" height="28">
+          <span id="status-monogram" class="faction-monogram" hidden></span>
           <div><strong id="status-faction"></strong><span id="status-general"></span></div>
         </div>
         <div class="status-metric"><span>Year</span><strong id="status-year">2010</strong></div>
@@ -80,7 +87,14 @@
             <button id="zoom-out" aria-label="Zoom out">−</button>
             <button id="reset-map" aria-label="Reset map view">◎</button>
             <button id="zoom-in" aria-label="Zoom in">+</button>
+            <button id="find-country" aria-label="Find a country">⌕</button>
+            <button id="diplomacy-button" aria-label="Diplomacy" title="Diplomacy" hidden>⚑</button>
+            <button id="replay-button" aria-label="Turn replay" title="Turn replay" hidden>▶</button>
           </div>
+          <section id="turn-replay" class="turn-replay" aria-label="Turn replay" hidden>
+            <p id="replay-caption" aria-live="polite"></p>
+            <div><button id="replay-prev" type="button">Previous</button><button id="replay-play" type="button">Play</button><button id="replay-next" type="button">Next</button><button id="replay-close" type="button">Close</button></div>
+          </section>
           <p class="map-hint">Tap a country · pinch, wheel, or buttons to zoom</p>
         </section>
         <aside id="country-panel" class="country-panel" aria-live="polite">
@@ -115,7 +129,7 @@
         <p>This is a clean-room, browser-native recreation built from static inspection of the preserved Wargame 1.5.1 IPA. The original ARM executable is not included in or executed by this web app.</p>
         <p>The six faction records, all 91 country records, world geometry, adjacency, starting forces, unit balance, upgrade costs, localization, and artwork were recovered from the archived resources. Apple-specific PNGs were normalized into standard browser PNGs while the source files remain untouched in the preservation folder.</p>
         <p>Original credits: Design &amp; programming — Jérémie Di Prizio and Stéphane Di Prizio. General design &amp; gameplay — Mathieu Di Prizio. Additional artwork &amp; game design — Benoît Leygue.</p>
-        <p>This preservation edition stores campaigns only in your browser. It makes no network requests during play. Portable JSON saves can be downloaded, validated on import, or handed to the operating system's share sheet for nearby device transfer.</p>
+        <p>Single-player campaigns are stored in your browser. Portable JSON saves can be downloaded, validated on import, or shared with nearby devices. Multiplayer connects two browsers directly and uses a server only to discover possible network routes.</p>
       </article>
     </section>
   </main>
@@ -143,7 +157,7 @@
     </div>
   </section>
   <div id="ending" class="ending" hidden>
-    <div><p class="eyebrow">Campaign complete</p><h2 id="ending-title"></h2><p id="ending-copy"></p><button id="ending-menu" class="primary-button">Return to main menu</button></div>
+    <div><p class="eyebrow">Campaign complete</p><h2 id="ending-title"></h2><p id="ending-copy"></p><div class="dialog-actions"><button id="ending-replay" class="secondary-button" type="button" hidden>Replay final turn</button><button id="ending-menu" class="primary-button">Return to main menu</button></div></div>
   </div>
 
   <script type="module" src="./src/app.js"></script>

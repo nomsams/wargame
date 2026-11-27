@@ -93,8 +93,21 @@ await command("Page.enable");
 await command("Runtime.enable");
 await command("Log.enable");
 await command("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+let accessChecked = false;
 let appReady = false;
 for (let attempt = 0; attempt < 300; attempt += 1) {
+  if (!accessChecked && await evaluate("document.querySelector('#access-gate')?.hidden === false")) {
+    await evaluate(`(() => {
+      const field = document.querySelector('#access-password');
+      const form = document.querySelector('#access-form');
+      field.value = 'incorrect';
+      form.requestSubmit();
+      if (!document.querySelector('#access-error').textContent || !document.querySelector('#app').hidden) throw new Error('Wrong password unlocked the app.');
+      field.value = 'wargame';
+      form.requestSubmit();
+    })()`);
+    accessChecked = true;
+  }
   if (await evaluate("Boolean(document.querySelector('#new-game-button')) && !document.querySelector('#loading')")) {
     appReady = true;
     break;
@@ -104,6 +117,98 @@ for (let attempt = 0; attempt < 300; attempt += 1) {
 if (!appReady) throw new Error(`Wargame did not finish loading within 30 seconds. ${JSON.stringify({ runtimeErrors, browserErrors })}`);
 await delay(800);
 
+if (process.argv.includes("--multiplayer")) {
+  await evaluate("document.querySelector('#multiplayer-button').click(); document.querySelector('#match-mode').value = 'coop'; document.querySelector('#create-invite').click()");
+  const modes = await evaluate(`(async () => {
+    async function until(read, error) {
+      for (let i = 0; i < 180; i++) {
+        const result = read();
+        if (result) return result;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error(error() || 'Browser check timed out.');
+    }
+    const hostStatus = () => document.querySelector('#pair-status')?.textContent;
+    let guest;
+    const gameActive = (doc) => doc.querySelector('#game-screen').classList.contains('active');
+    const turn = (doc) => doc.querySelector('#end-turn-button');
+    const year = (doc) => doc.querySelector('#status-year').textContent;
+    async function pair() {
+      const invite = await until(() => document.querySelector('#pair-link')?.value, hostStatus);
+      if (!document.querySelector('#pair-qr svg')) throw new Error('Invite QR missing.');
+      guest = document.createElement('iframe');
+      guest.style.cssText = 'position:fixed;z-index:100;inset:0;width:400px;height:500px;opacity:.9';
+      guest.src = invite;
+      document.body.append(guest);
+      const guestDoc = await until(() => guest.contentDocument?.querySelector('#pair-form') && guest.contentDocument, () => 'Guest did not open the invite.');
+      guestDoc.querySelector('#pair-form').requestSubmit();
+      const reply = await until(() => guestDoc.querySelector('#pair-link')?.value, () => guestDoc.querySelector('#pair-status')?.textContent);
+      if (!guestDoc.querySelector('#pair-qr svg')) throw new Error('Reply QR missing.');
+      document.querySelector('#pair-input').value = reply;
+      document.querySelector('#pair-form').requestSubmit();
+      await until(() => gameActive(document) && gameActive(guestDoc) && !turn(guestDoc).disabled, hostStatus);
+      return guestDoc;
+    }
+    let guestDoc = await pair();
+    if (turn(document).disabled) throw new Error('Both players should plan simultaneously.');
+    document.querySelector('#diplomacy-button').click();
+    if (!document.querySelector('#dialog-content').textContent.includes('Co-op partner')) throw new Error('Co-op alliance missing.');
+    document.querySelector('.dialog-close').click();
+    document.querySelector('#move-action').click();
+    document.querySelector('#move-target').value = 'CANADA';
+    document.querySelector('#move-form').requestSubmit();
+    if (document.querySelector('#queue-count').textContent !== '1' || guestDoc.querySelector('#queue-count').textContent !== '0') throw new Error('Private drafts leaked or did not queue.');
+    turn(document).click();
+    await until(() => turn(document).textContent.includes('Orders Locked'), () => 'Host orders did not lock.');
+    if (year(document) !== '2010' || year(guestDoc) !== '2010') throw new Error('Round advanced before both players locked.');
+    turn(guestDoc).click();
+    await until(() => year(document) === '2011' && year(guestDoc) === '2011', () => 'Peers did not advance to 2011.');
+    document.querySelector('#replay-button').click();
+    if (document.querySelector('#turn-replay').hidden || !document.querySelector('#replay-caption').textContent.includes('Canada')) throw new Error('Turn replay did not show the resolved route.');
+    document.querySelector('#replay-close').click();
+    document.querySelector('#exit-button').click();
+    document.querySelector('#leave-match').click();
+    await until(() => turn(guestDoc).textContent.includes('Disconnected'), () => 'Guest did not get a disconnect notice.');
+    guest.remove();
+    document.querySelector('#multiplayer-button').click();
+    document.querySelector('#resume-invite').click();
+    guestDoc = await pair();
+    if (year(document) !== '2011' || year(guestDoc) !== '2011') throw new Error('Peers did not reconnect to their saved round.');
+    turn(document).click();
+    turn(guestDoc).click();
+    await until(() => year(document) === '2012' && year(guestDoc) === '2012', () => 'The resumed match did not advance.');
+    document.querySelector('#exit-button').click();
+    document.querySelector('#leave-match').click();
+    guest.remove();
+    return { coOpConnected: true, sealedRoundResolved: true, reconnectedAndAdvanced: true };
+  })()`);
+
+  await command("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await evaluate(`(() => {
+    const scenario = document.querySelector('#campaign-scenario');
+    scenario.value = 'regional-coalitions';
+    scenario.dispatchEvent(new Event('change'));
+    if (!document.querySelector('#faction-grid').textContent.includes('Iranian Coalition')
+      || !document.querySelector('#faction-grid').textContent.includes('Greater Israel')) throw new Error('Regional factions did not appear.');
+    scenario.value = '';
+    scenario.dispatchEvent(new Event('change'));
+    document.querySelector('#campaign-alliances').checked = false;
+  })()`);
+  await evaluate("document.querySelector('#new-game-button').click(); document.querySelector('#setup-form').requestSubmit()");
+  await delay(400);
+  const zoom = {};
+  for (const country of ["BELGIUM", "NETHERLAND"]) {
+    await evaluate(`document.querySelector('#find-country').click(); document.querySelector('#country-locator').value = '${country}'; document.querySelector('#find-country-form').requestSubmit()`);
+    zoom[country] = await evaluate("Number(document.querySelector('#world-map').dataset.zoom)");
+    if (zoom[country] <= 4) throw new Error(`Country finder did not zoom past the old limit for ${country}.`);
+  }
+  await evaluate("document.querySelector('#objective-button').click(); document.querySelector('[data-force-country=UNITED_STATES]').click(); document.querySelector('#buy-action').click()");
+  if (!await evaluate("document.querySelector('#command-dialog').open && !!document.querySelector('#buy-form')")) throw new Error("Mobile buy dialog did not open.");
+  await command("Input.dispatchMouseEvent", { type: "mousePressed", x: 20, y: 20, button: "left", buttons: 1, clickCount: 1 });
+  await command("Input.dispatchMouseEvent", { type: "mouseReleased", x: 20, y: 20, button: "left", buttons: 0, clickCount: 1 });
+  if (await evaluate("document.querySelector('#command-dialog').open")) throw new Error("Mobile buy dialog did not dismiss on its backdrop.");
+  console.log(JSON.stringify({ ...modes, zoom, accessChecked, runtimeErrors }, null, 2));
+} else {
 const menuTypography = await evaluate(`(() => {
   const buttons = [...document.querySelectorAll('.stencil-button')];
   const styles = buttons.map((button) => {
@@ -113,7 +218,7 @@ const menuTypography = await evaluate(`(() => {
   });
   return { count: buttons.length, styles, fits: styles.every((style) => style.bottom <= innerHeight) };
 })()`);
-if (menuTypography.count !== 5 || !menuTypography.fits || new Set(menuTypography.styles.map((style) => `${style.fontFamily}|${style.fontSize}|${style.fontWeight}|${style.height}`)).size !== 1) {
+if (menuTypography.count !== 6 || !menuTypography.fits || new Set(menuTypography.styles.map((style) => `${style.fontFamily}|${style.fontSize}|${style.fontWeight}|${style.height}`)).size !== 1) {
   throw new Error(`Main-menu typography is inconsistent or does not fit: ${JSON.stringify(menuTypography)}.`);
 }
 
@@ -186,20 +291,28 @@ const saveImportLoaded = await evaluate(`({
 if (saveImportLoaded.active !== 'game-screen' || saveImportLoaded.year !== '2010' || saveImportLoaded.localYear !== 2010) throw new Error(`Validated save did not load: ${JSON.stringify(saveImportLoaded)}.`);
 
 const mapTargets = await evaluate(`(async () => {
-  const data = await fetch('./data/game-data.json').then((response) => response.json());
-  const rect = document.querySelector('#world-map').getBoundingClientRect();
-  const [halfLatitude, halfLongitude] = data.map.halfSize;
+  const [data, { projectMapPoint }] = await Promise.all([
+    fetch('./data/game-data.json').then((response) => response.json()),
+    import('./src/projection.js'),
+  ]);
+  const canvas = document.querySelector('#world-map');
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(2, devicePixelRatio || 1);
   const point = (name) => {
     const country = data.map.countries.find((item) => item.name === name);
-    const indices = data.map.indices.slice(country.indexStart, country.indexStart + 3);
-    const triangle = indices.map((index) => data.map.vertices[index]);
-    const vertex = [
-      triangle.reduce((sum, item) => sum + item[0], 0) / 3,
-      triangle.reduce((sum, item) => sum + item[1], 0) / 3
-    ];
+    let largestArea = -1;
+    let center;
+    for (let i = country.indexStart; i < country.indexStart + country.indexLength; i += 3) {
+      const [a, b, c] = data.map.indices.slice(i, i + 3).map((index) => data.map.vertices[index]);
+      const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+      if (area <= largestArea) continue;
+      largestArea = area;
+      center = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3];
+    }
+    const [x, y] = projectMapPoint(center, data.map.halfSize, canvas.width / scale, canvas.height / scale);
     return {
-      x: rect.left + 18 + (halfLongitude - vertex[1]) / (halfLongitude * 2) * (rect.width - 36),
-      y: rect.top + 18 + (halfLatitude - vertex[0]) / (halfLatitude * 2) * (rect.height - 36)
+      x: rect.left + x * scale * rect.width / canvas.width,
+      y: rect.top + y * scale * rect.height / canvas.height,
     };
   };
   return { russia: point('RUSSIA'), unitedStates: point('UNITED_STATES'), mexico: point('MEXICO') };
@@ -400,7 +513,7 @@ const mobile = await evaluate(`({
     return { id: button.id, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height };
   })
 })`);
-if (mobile.bodyWidth > mobile.viewport[0] || mobile.scrollY !== 0) throw new Error(`Mobile page overflows or retained a prior screen's scroll offset: ${JSON.stringify(mobile)}.`);
+if (mobile.viewport[0] !== 390 || mobile.bodyWidth > 390 || mobile.scrollY !== 0) throw new Error(`Mobile page overflows or retained a prior screen's scroll offset: ${JSON.stringify(mobile)}.`);
 if (Math.abs(mobile.projectionAspect - 1.5) > .01 || !mobile.mapHintVisible || mobile.settingsIconFilter === 'none') throw new Error(`Portrait projection, touch hint, or Settings icon styling failed: ${JSON.stringify(mobile)}.`);
 if (mobile.toolbar.scrollWidth > mobile.toolbar.clientWidth) throw new Error(`Mobile toolbar requires horizontal scrolling: ${JSON.stringify(mobile.toolbar)}.`);
 for (const button of mobile.toolbar.buttons) {
@@ -453,9 +566,9 @@ await delay(120);
 const mobileForces = await evaluate(`(() => {
   const dialog = document.querySelector('#command-dialog').getBoundingClientRect();
   const first = document.querySelector('.force-country').getBoundingClientRect();
-  return { cards: document.querySelectorAll('.force-country').length, dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom }, firstWidth: first.width, resourceLog: [...document.querySelectorAll('.log-item strong')].some((item) => item.textContent.includes('Country resources delivered')) };
+  return { viewport: [innerWidth, innerHeight], cards: document.querySelectorAll('.force-country').length, dialog: { left: dialog.left, right: dialog.right, top: dialog.top, bottom: dialog.bottom }, firstWidth: first.width, resourceLog: [...document.querySelectorAll('.log-item strong')].some((item) => item.textContent.includes('Country resources delivered')) };
 })()`);
-if (mobileForces.cards < 3 || mobileForces.dialog.left < 0 || mobileForces.dialog.right > mobile.viewport[0] || mobileForces.firstWidth > mobile.viewport[0] || !mobileForces.resourceLog) throw new Error(`Mobile force overview or resource report is not reachable: ${JSON.stringify(mobileForces)}.`);
+if (mobileForces.viewport[0] !== 390 || mobileForces.cards < 3 || mobileForces.dialog.left < 0 || mobileForces.dialog.right > 390 || mobileForces.firstWidth > 390 || !mobileForces.resourceLog) throw new Error(`Mobile force overview or resource report is not reachable: ${JSON.stringify(mobileForces)}.`);
 await screenshot("forces-mobile.png");
 await evaluate("document.querySelector('[data-force-country=\"UNITED_STATES\"]').click(); document.querySelector('#settings-button').click()");
 await delay(120);
@@ -493,6 +606,7 @@ if (mobileDialog.dialog.left < 0 || mobileDialog.dialog.right > mobile.viewport[
 await screenshot("dialog-mobile.png");
 
 console.log(JSON.stringify({ menuTypography, setup, start, saveTransfer, saveDownload, saveImport, saveImportLoaded, mapSelection, resourceDisplay, forceOverview, targetOrdering, transportDialog, dialog, rejectedOrder, persistentUpgrade, attackPlanner, attackCommitment, queued, battleAnimation, battleResult, afterTurn, mobile, pinchZoom, mobileLandscape, mobileForces, settingsDialog, mobileSave, exitDialog, mobileDialog, runtimeErrors }, null, 2));
+}
 } finally {
   try { socket?.close(); } catch {}
   if (process.platform === "win32" && edge.pid) {
